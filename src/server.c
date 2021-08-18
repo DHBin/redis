@@ -3073,7 +3073,9 @@ int listenToPort(int port, socketFds *sfd) {
             closeSocketListeners(sfd);
             return C_ERR;
         }
+        // 设置成非阻塞
         anetNonBlock(NULL,sfd->fd[sfd->count]);
+        // 添加文件描述符 FD_CLOEXEC 标识，在子进程中自动关闭
         anetCloexec(sfd->fd[sfd->count]);
         sfd->count++;
     }
@@ -3139,7 +3141,9 @@ void initServer(void) {
 
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
+    // 信号处理，接收到关闭信号、异常信号逻辑
     setupSignalHandlers();
+    // 设置线程被取消的时候，垃圾退出
     makeThreadKillable();
 
     if (server.syslog_enabled) {
@@ -3183,10 +3187,13 @@ void initServer(void) {
         exit(1);
     }
 
+    // 创建共享对象，节省内存开销
     createSharedObjects();
+    // 调整文件句柄数
     adjustOpenFilesLimit();
     const char *clk_msg = monotonicInit();
     serverLog(LL_NOTICE, "monotonic clock: %s", clk_msg);
+    // 创建事件容器
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -3194,6 +3201,7 @@ void initServer(void) {
             strerror(errno));
         exit(1);
     }
+    // 分配db内存
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
@@ -5560,7 +5568,9 @@ void createPidFile(void) {
 void daemonize(void) {
     int fd;
 
+    // 如果子线程启动成功，结束父进程
     if (fork() != 0) exit(0); /* parent exits */
+    // 后台运行
     setsid(); /* create a new session */
 
     /* Every output goes to /dev/null. If Redis is daemonized but
@@ -6304,6 +6314,10 @@ int main(int argc, char **argv) {
     if (server.sentinel_mode) sentinelCheckConfigFile();
     server.supervised = redisIsSupervised(server.supervised_mode);
     int background = server.daemonize && !server.supervised;
+    /*
+     * 脱离终端，后台运行
+     * $ redis-server --daemonize yes
+     * */
     if (background) daemonize();
 
     serverLog(LL_WARNING, "oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo");
@@ -6321,9 +6335,15 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING, "Configuration loaded");
     }
 
+    // 读取系统的oom机制
     readOOMScoreAdj();
+    // 初始化服务器
     initServer();
+    // 如果是后台运行，或者是指定了pidfile，就创建pid文件
+    // 默认是/var/run/redis.pid
+    // 如果想杀死redis可以使用kill -15 `cat /var/run/redis.pid`
     if (background || server.pidfile) createPidFile();
+    // 设置进程名
     if (server.set_proc_title) redisSetProcTitle(NULL);
     redisAsciiArt();
     checkTcpBacklogSettings();
