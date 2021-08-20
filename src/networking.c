@@ -3458,6 +3458,7 @@ void *IOThreadMain(void *myid) {
         }
 
         /* Give the main thread a chance to stop this thread. */
+        /*  */
         if (getIOPendingCount(id) == 0) {
             pthread_mutex_lock(&io_threads_mutex[id]);
             pthread_mutex_unlock(&io_threads_mutex[id]);
@@ -3582,11 +3583,15 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 
     /* If I/O threads are disabled or we have few clients to serve, don't
      * use I/O threads, but the boring synchronous code. */
+    /* stopThreadedIOIfNeeded 会判断待写数量是否小于线程数的两倍，如果条件成立会锁住线程并返回1
+     * 所以并不是开启了多线程就必定会使用得上多线程，需要达到一定的量才会启动多线程处理
+     * */
     if (server.io_threads_num == 1 || stopThreadedIOIfNeeded()) {
         return handleClientsWithPendingWrites();
     }
 
     /* Start threads if needed. */
+    /* 解锁io线程 */
     if (!server.io_threads_active) startThreadedIO();
 
     /* Distribute the clients across N different lists. */
@@ -3606,12 +3611,14 @@ int handleClientsWithPendingWritesUsingThreads(void) {
         }
 
         int target_id = item_id % server.io_threads_num;
+        /* 给io线程分配任务 IOThreadMain是io线程的处理逻辑*/
         listAddNodeTail(io_threads_list[target_id],c);
         item_id++;
     }
 
     /* Give the start condition to the waiting threads, by setting the
      * start condition atomic var. */
+    /* 设置每个io线程需要处理的任务数量 */
     io_threads_op = IO_THREADS_OP_WRITE;
     for (int j = 1; j < server.io_threads_num; j++) {
         int count = listLength(io_threads_list[j]);
@@ -3619,6 +3626,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     }
 
     /* Also use the main thread to process a slice of clients. */
+    /* 第1个是主线程，处理主线程的写任务 */
     listRewind(io_threads_list[0],&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -3627,6 +3635,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     listEmpty(io_threads_list[0]);
 
     /* Wait for all the other threads to end their work. */
+    /* 等待io线程的任务处理完成 */
     while(1) {
         unsigned long pending = 0;
         for (int j = 1; j < server.io_threads_num; j++)
@@ -3636,6 +3645,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 
     /* Run the list of clients again to install the write handler where
      * needed. */
+    /* 通知事件容器执行写出任务 */
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
