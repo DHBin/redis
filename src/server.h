@@ -1801,6 +1801,7 @@ int validateProcTitleTemplate(const char *template);
 int redisCommunicateSystemd(const char *sd_notify_msg);
 void redisSetCpuAffinity(const char *cpulist);
 
+// region 网络相关
 /* networking.c -- Networking and Client related operations */
 client *createClient(connection *conn);
 void closeTimedoutClients(void);
@@ -1821,6 +1822,7 @@ void acceptHandler(aeEventLoop *el, int fd, void *privdata, int mask);
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask);
 void acceptTLSHandler(aeEventLoop *el, int fd, void *privdata, int mask);
 void acceptUnixHandler(aeEventLoop *el, int fd, void *privdata, int mask);
+/* 读取查询指令 */
 void readQueryFromClient(connection *conn);
 void addReplyNull(client *c);
 void addReplyNullArray(client *c);
@@ -1832,6 +1834,7 @@ void addReplyBulk(client *c, robj *obj);
 void addReplyBulkCString(client *c, const char *s);
 void addReplyBulkCBuffer(client *c, const void *p, size_t len);
 void addReplyBulkLongLong(client *c, long long ll);
+/* addReply 会把客户端添加到server.clients_pending_write队列中 */
 void addReply(client *c, robj *obj);
 void addReplySds(client *c, sds s);
 void addReplyBulkSds(client *c, sds s);
@@ -1891,6 +1894,7 @@ int handleClientsWithPendingReadsUsingThreads(void);
 int stopThreadedIOIfNeeded(void);
 int clientHasPendingReplies(client *c);
 void unlinkClient(client *c);
+/* 向客户端写数据 */
 int writeToClient(client *c, int handler_installed);
 void linkClient(client *c);
 void protectClient(client *c);
@@ -1907,6 +1911,7 @@ void addReplyStatusFormat(client *c, const char *fmt, ...)
 void addReplyErrorFormat(client *c, const char *fmt, ...);
 void addReplyStatusFormat(client *c, const char *fmt, ...);
 #endif
+//endregion
 
 /* Client side caching (tracking mode) */
 void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **prefix, size_t numprefix);
@@ -2199,6 +2204,7 @@ int zslLexValueLteMax(sds value, zlexrangespec *spec);
 int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level);
 size_t freeMemoryGetNotCountedMemory();
 int overMaxmemoryAfterAlloc(size_t moremem);
+/* 处理客户端发来的指令 */
 int processCommand(client *c);
 int processPendingCommandsAndResetClient(client *c);
 void setupSignalHandlers(void);

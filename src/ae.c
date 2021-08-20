@@ -70,6 +70,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     monotonicInit();    /* just in case the calling app didn't initialize */
 
     if ((eventLoop = zmalloc(sizeof(*eventLoop))) == NULL) goto err;
+    // 事件列表
     eventLoop->events = zmalloc(sizeof(aeFileEvent)*setsize);
     eventLoop->fired = zmalloc(sizeof(aeFiredEvent)*setsize);
     if (eventLoop->events == NULL || eventLoop->fired == NULL) goto err;
@@ -81,6 +82,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->beforesleep = NULL;
     eventLoop->aftersleep = NULL;
     eventLoop->flags = 0;
+    /* aeApiCreate 创建对于的事件模型,比如epoll */
     if (aeApiCreate(eventLoop) == -1) goto err;
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
