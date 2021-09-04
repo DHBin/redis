@@ -107,11 +107,15 @@ sds _sdsnewlen(const void *init, size_t initlen, int trymalloc) {
     /* Empty strings are usually created in order to append. Use type 8
      * since type 5 is not good at this. */
     if (type == SDS_TYPE_5 && initlen == 0) type = SDS_TYPE_8;
+    /* hdrlen = sizeof(struct sdshdr###)，就是结构体的长度 */
     int hdrlen = sdsHdrSize(type);
     unsigned char *fp; /* flags pointer. */
     size_t usable;
 
     assert(initlen + hdrlen + 1 > initlen); /* Catch size_t overflow */
+    /* sh 是结构体的长度 + 字符串长度 + 1 这里多出一位是存储 '\0' 的
+     * 在内存中是这样子的：sdshdr# | char[] | '\0'
+     * */
     sh = trymalloc?
         s_trymalloc_usable(hdrlen+initlen+1, &usable) :
         s_malloc_usable(hdrlen+initlen+1, &usable);
