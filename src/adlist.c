@@ -54,6 +54,7 @@ list *listCreate(void)
 }
 
 /* Remove all the elements from the list without destroying the list itself. */
+/* 清空链表 */
 void listEmpty(list *list)
 {
     unsigned long len;
@@ -74,6 +75,7 @@ void listEmpty(list *list)
 /* Free the whole list.
  *
  * This function can't fail. */
+/* 清空链表，并回收内存 */
 void listRelease(list *list)
 {
     listEmpty(list);
@@ -86,6 +88,7 @@ void listRelease(list *list)
  * On error, NULL is returned and no operation is performed (i.e. the
  * list remains unaltered).
  * On success the 'list' pointer you pass to the function is returned. */
+/* 在链表头部插入，O(1) */
 list *listAddNodeHead(list *list, void *value)
 {
     listNode *node;
@@ -112,6 +115,7 @@ list *listAddNodeHead(list *list, void *value)
  * On error, NULL is returned and no operation is performed (i.e. the
  * list remains unaltered).
  * On success the 'list' pointer you pass to the function is returned. */
+/* 在链表尾部插入 O(1) */
 list *listAddNodeTail(list *list, void *value)
 {
     listNode *node;
@@ -132,6 +136,7 @@ list *listAddNodeTail(list *list, void *value)
     return list;
 }
 
+/* 在某个节点插入 O(1) */
 list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
     listNode *node;
 
@@ -165,6 +170,7 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
  * It's up to the caller to free the private value of the node.
  *
  * This function can't fail. */
+/* 删除某个节点，O(1) */
 void listDelNode(list *list, listNode *node)
 {
     if (node->prev)
