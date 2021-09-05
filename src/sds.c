@@ -124,7 +124,9 @@ sds _sdsnewlen(const void *init, size_t initlen, int trymalloc) {
         init = NULL;
     else if (!init)
         memset(sh, 0, hdrlen+initlen+1);
+    /* sh（首地址） + hdr的长度 = buf的首地址  */
     s = (char*)sh+hdrlen;
+    /* s指针 - 1 = flags的地址 */
     fp = ((unsigned char*)s)-1;
     usable = usable-hdrlen-1;
     if (usable > sdsTypeMaxSize(type))
@@ -233,7 +235,9 @@ void sdsclear(sds s) {
  * bytes after the end of the string, plus one more byte for nul term.
  *
  * Note: this does not change the *length* of the sds string as returned
- * by sdslen(), but only the free buffer space we have. */
+ * by sdslen(), but only the free buffer space we have.
+ * 字符串扩容
+ * */
 sds sdsMakeRoomFor(sds s, size_t addlen) {
     void *sh, *newsh;
     size_t avail = sdsavail(s);
@@ -243,6 +247,7 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
     size_t usable;
 
     /* Return ASAP if there is enough space left. */
+    /* 如果可用空间>=需要添加的空间，直接返回 */
     if (avail >= addlen) return s;
 
     len = sdslen(s);
@@ -290,7 +295,9 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
  * will require a reallocation.
  *
  * After the call, the passed sds string is no longer valid and all the
- * references must be substituted with the new pointer returned by the call. */
+ * references must be substituted with the new pointer returned by the call.
+ * 字符串缩容，把未使用的空间释放
+ * */
 sds sdsRemoveFreeSpace(sds s) {
     void *sh, *newsh;
     char type, oldtype = s[-1] & SDS_TYPE_MASK;
