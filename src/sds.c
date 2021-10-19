@@ -192,11 +192,13 @@ sds sdsnew(const char *init) {
 }
 
 /* Duplicate an sds string. */
+/* 复制一个相同的字符串 */
 sds sdsdup(const sds s) {
     return sdsnewlen(s, sdslen(s));
 }
 
 /* Free an sds string. No operation is performed if 's' is NULL. */
+/* 释放内存 */
 void sdsfree(sds s) {
     if (s == NULL) return;
     s_free((char*)s-sdsHdrSize(s[-1]));
@@ -240,8 +242,11 @@ void sdsclear(sds s) {
  * */
 sds sdsMakeRoomFor(sds s, size_t addlen) {
     void *sh, *newsh;
+    /* 可用空间 */
     size_t avail = sdsavail(s);
+    /* 长度 */
     size_t len, newlen;
+    /* 获取类型 */
     char type, oldtype = s[-1] & SDS_TYPE_MASK;
     int hdrlen;
     size_t usable;
@@ -251,41 +256,61 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
     if (avail >= addlen) return s;
 
     len = sdslen(s);
+    /* sh是sds 首部（hdr）信息的指针地址 */
     sh = (char*)s-sdsHdrSize(oldtype);
+    /* 计算新的长度 */
     newlen = (len+addlen);
     assert(newlen > len);   /* Catch size_t overflow */
+    /* 新的长度小于 1024*1024（1M）的话，扩容到新的长度的两倍 */
     if (newlen < SDS_MAX_PREALLOC)
         newlen *= 2;
     else
+        /* 新的长度大于等于 1024*1024（1M）的话，新的长度加上 1024*1024（1M） */
         newlen += SDS_MAX_PREALLOC;
 
+    /* 通过新的长度获取类型 */
     type = sdsReqType(newlen);
 
     /* Don't use type 5: the user is appending to the string and type 5 is
      * not able to remember empty space, so sdsMakeRoomFor() must be called
      * at every appending operation. */
+    /* 这里把SDS_TYPE_5转成SDS_TYPE_8，原因是type 5的数据结构没有记录剩余的空间，
+     * 如果扩容需要更多的操作
+     * */
     if (type == SDS_TYPE_5) type = SDS_TYPE_8;
 
+    /* 计算首部长度 */
     hdrlen = sdsHdrSize(type);
     assert(hdrlen + newlen + 1 > len);  /* Catch size_t overflow */
+    /* 旧的类型与新的类型一致 */
     if (oldtype==type) {
+        /* 因为类型一致，扩容后把旧的sh复制到新的内存空间中 */
         newsh = s_realloc_usable(sh, hdrlen+newlen+1, &usable);
         if (newsh == NULL) return NULL;
+        /* 首部地址 + 首部的长度 = char* */
         s = (char*)newsh+hdrlen;
     } else {
         /* Since the header size changes, need to move the string forward,
          * and can't use realloc */
+        /* 类型不一致，重新分配一个sh */
         newsh = s_malloc_usable(hdrlen+newlen+1, &usable);
         if (newsh == NULL) return NULL;
+        /* 把char*复制到新的内存空间中 */
         memcpy((char*)newsh+hdrlen, s, len+1);
+        /* 把旧的释放 */
         s_free(sh);
+        /* 首部地址 + 首部的长度 = char* */
         s = (char*)newsh+hdrlen;
+        /* 设置类型 */
         s[-1] = type;
+        /* 设置长度 */
         sdssetlen(s, len);
     }
+    /* 可用空间 = 总空间 - 首部长度 - 1，-1的原因是char*尾部会追加一个'\0'，需要把这个去掉 */
     usable = usable-hdrlen-1;
     if (usable > sdsTypeMaxSize(type))
         usable = sdsTypeMaxSize(type);
+    /* 设置可用空间，alloc的单位是Byte */
     sdssetalloc(s, usable);
     return s;
 }
@@ -318,6 +343,8 @@ sds sdsRemoveFreeSpace(sds s) {
      * required, we just realloc(), letting the allocator to do the copy
      * only if really needed. Otherwise if the change is huge, we manually
      * reallocate the string to use the different header type. */
+    /* 和扩容的代码差不多，都是相同类型的话，申请一块新的内存空间，把旧的所有内容复制过去，不一致
+     * 的话，申请一块内存空间，重新赋值长度、类型、可用空间，把char*复制过去。 */
     if (oldtype==type || type > SDS_TYPE_8) {
         newsh = s_realloc(sh, oldhdrlen+len+1);
         if (newsh == NULL) return NULL;
