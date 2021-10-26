@@ -59,6 +59,10 @@
 #include <sys/socket.h>
 #include <sys/resource.h>
 
+#ifdef LEARN_REDIS
+#include "learn.h"
+#endif
+
 #ifdef __linux__
 #include <sys/mman.h>
 #endif
@@ -6176,6 +6180,7 @@ redisTestProc *getTestProcByName(const char *name) {
 }
 #endif
 
+#ifndef LEARN_REDIS
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
@@ -6439,5 +6444,10 @@ int main(int argc, char **argv) {
     aeDeleteEventLoop(server.el);
     return 0;
 }
+#else
+int main(int argc, char **argv) {
+    return learn();
+}
+#endif
 
 /* The End */
