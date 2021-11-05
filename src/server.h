@@ -995,18 +995,25 @@ struct sharedObjectsStruct {
 
 /* ZSETs use a specialized version of Skiplists */
 typedef struct zskiplistNode {
+    /* 节点数据 */
     sds ele;
+    /* 分值 */
     double score;
+    /* 上一个节点 */
     struct zskiplistNode *backward;
     struct zskiplistLevel {
         struct zskiplistNode *forward;
+        /* 距离下一个节点的间隔，遍历下去可以知道某个节点在什么位置 */
         unsigned long span;
     } level[];
 } zskiplistNode;
 
 typedef struct zskiplist {
+    /* 首尾节点 */
     struct zskiplistNode *header, *tail;
+    /* 链表长度 */
     unsigned long length;
+    /* 等级 */
     int level;
 } zskiplist;
 
@@ -2155,6 +2162,7 @@ void ACLUpdateDefaultUserPassword(sds password);
 /* Struct to hold an inclusive/exclusive range spec by score comparison. */
 typedef struct {
     double min, max;
+    /* 如果是> 1的话，是开区间，否则闭区间 */
     int minex, maxex; /* are min or max exclusive? */
 } zrangespec;
 

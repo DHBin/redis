@@ -81,10 +81,15 @@ zskiplist *zslCreate(void) {
     int j;
     zskiplist *zsl;
 
+    /* 给zsl分配内存 */
     zsl = zmalloc(sizeof(*zsl));
+    /* 初始化等级为1 */
     zsl->level = 1;
+    /* 初始化等级为0 */
     zsl->length = 0;
+    /* 创建根节点 */
     zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    /* 初始化每个层级 */
     for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
         zsl->header->level[j].forward = NULL;
         zsl->header->level[j].span = 0;
@@ -128,8 +133,17 @@ int zslRandomLevel(void) {
 
 /* Insert a new node in the skiplist. Assumes the element does not already
  * exist (up to the caller to enforce that). The skiplist takes ownership
- * of the passed SDS string 'ele'. */
+ * of the passed SDS string 'ele'.
+ * 步骤：
+ * 1、找出每个层级插入的位置
+ * 2、根据次幂法则随机生成新插入的节点的层级
+ * 3、遍历生成的层级在对应位置插入节点
+ * 4、更新节点的间隔
+ * 5、赋值新增节点的上一个节点(backward)
+ * 6、更新链表长度
+ * */
 zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
+    /* update的作用是记录在每一层插入的位置 */
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
@@ -139,49 +153,79 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
     for (i = zsl->level-1; i >= 0; i--) {
         /* store rank that is crossed to reach the insert position */
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+        /* 当前节点的分数小于新增的分数 或者 （当前节点的分数等于新增的分数 并且 当前节点数据小于新增节点数据）
+         * 这个while循环的作用是记录间隔 和 找出插入新节点的位置
+         * */
         while (x->level[i].forward &&
                 (x->level[i].forward->score < score ||
                     (x->level[i].forward->score == score &&
                     sdscmp(x->level[i].forward->ele,ele) < 0)))
         {
+            /* 记录层级的间隔 */
             rank[i] += x->level[i].span;
+            /* 指向下一个节点继续上面的逻辑 */
             x = x->level[i].forward;
         }
+        /* 最靠近需要插入节点的分数的节点 */
         update[i] = x;
     }
     /* we assume the element is not already inside, since we allow duplicated
      * scores, reinserting the same element should never happen since the
      * caller of zslInsert() should test in the hash table if the element is
      * already inside or not. */
+    /* 次幂法则（二八法则）level越大出现的机率越小 */
     level = zslRandomLevel();
+    /* 随机生成的层级大于原来的层级 */
     if (level > zsl->level) {
+        /* 把新的层级节点都指向头部 */
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
             update[i] = zsl->header;
+            /* 间隔是链表的长度，因为是新的一层，间隔就是链表的长度 */
             update[i]->level[i].span = zsl->length;
         }
         zsl->level = level;
     }
+    /* x是新建的节点 */
     x = zslCreateNode(level,score,ele);
+    /*
+     * 新增节点：x
+     * 原来有的节点：o
+     *
+     * o - o 循环后在两个o之间插入x，变成
+     * o - x - o
+     * */
     for (i = 0; i < level; i++) {
+        /* 这一步相当于把原来节点的下一个节点 分配给 新的节点的下一个节点 */
         x->level[i].forward = update[i]->level[i].forward;
+        /* 原来节点的下一个节点 指向 新建节点 */
         update[i]->level[i].forward = x;
+        /* == 这里注意一下，新增节点的上一个还没有赋值 == */
 
         /* update span covered by update[i] as x is inserted here */
+        /* 更新span */
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
 
-    /* increment span for untouched levels */
+    /* increment span for untouched levels 把level以上的层级span+1，因为上面的循环没有更新到level以上的层级 */
     for (i = level; i < zsl->level; i++) {
         update[i]->level[i].span++;
     }
 
+    /*
+     * ==在这里给新增节点的上一个赋值==
+     * 给新的节点关联上一个节点，为什么是update[0]？因为第1层的间隔是1，update[0]就是这个
+     * 新增节点的上一个
+     * */
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
+    /* 如果第1层的下一个节点不为空（在链表的节点间插入值，比如在10与12之间插入11） */
     if (x->level[0].forward)
+        /* 更新节点的上一个节点 */
         x->level[0].forward->backward = x;
-    else
+    else /* 为空的话说明是在尾部插入，把链表的tail指向新的节点 */
         zsl->tail = x;
+    /* 长度+1 */
     zsl->length++;
     return x;
 }
@@ -221,7 +265,14 @@ int zslDelete(zskiplist *zsl, double score, sds ele, zskiplistNode **node) {
     int i;
 
     x = zsl->header;
+    /* 从高到低遍历每个层级 */
     for (i = zsl->level-1; i >= 0; i--) {
+        /*
+         * 满足一下条件，指针向前移动：
+         * 1、层级的下一个节点(x)不为空
+         * 2、x的分值小于传进来的分值，或者分值相等的情况下，x的数据
+         * 字节长度小于传进来的数据的字节长度
+         * */
         while (x->level[i].forward &&
                 (x->level[i].forward->score < score ||
                     (x->level[i].forward->score == score &&
@@ -234,9 +285,12 @@ int zslDelete(zskiplist *zsl, double score, sds ele, zskiplistNode **node) {
     /* We may have multiple elements with the same score, what we need
      * is to find the element with both the right score and object. */
     x = x->level[0].forward;
+    /* 因为在一个链表中可能有有多个分值相同的节点，在分值相同的情况下，还需要对比数据 */
     if (x && score == x->score && sdscmp(x->ele,ele) == 0) {
+        /* 删除节点 */
         zslDeleteNode(zsl, x, update);
         if (!node)
+            /* 回收内存 */
             zslFreeNode(x);
         else
             *node = x;
@@ -309,6 +363,7 @@ int zslValueLteMax(double value, zrangespec *spec) {
 }
 
 /* Returns if there is a part of the zset is in range. */
+/* 判断是否在区间内 */
 int zslIsInRange(zskiplist *zsl, zrangespec *range) {
     zskiplistNode *x;
 
@@ -335,6 +390,12 @@ zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec *range) {
     if (!zslIsInRange(zsl,range)) return NULL;
 
     x = zsl->header;
+    /* 大概的意思就是从跳表的最高层级开始遍历，在同一层级中不断取下一个节点的
+     * 分数来判断是否小于区间的最小值，如果成立，继续遍历这个节点的下一个层级
+     * 重复上面的逻辑，直到把所有层级遍历完
+     *
+     * 作用：从大往小缩进，取到在区间范围内的最小值
+     * */
     for (i = zsl->level-1; i >= 0; i--) {
         /* Go forward while *OUT* of range. */
         while (x->level[i].forward &&
@@ -347,6 +408,7 @@ zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec *range) {
     serverAssert(x != NULL);
 
     /* Check if score <= max. */
+    /* 判断分数是否大于最大值 */
     if (!zslValueLteMax(x->score,range)) return NULL;
     return x;
 }

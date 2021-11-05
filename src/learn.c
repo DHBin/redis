@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <malloc.h>
+#include <stdlib.h>
 #include "learn.h"
 #include "quicklist.h"
 #include "ziplist.h"
 #include "sds.h"
+#include "server.h"
 
 void learn_sds();
 
@@ -13,12 +15,19 @@ void learn_ziplist();
 /* 快速链表 */
 void learn_quicklist();
 
+/* 跳跃表 */
+void learn_zsl();
+
+// =========util=========
 void println();
+void randomStr(char* str, size_t len);
+// =========util=========
 
 int learn() {
-    learn_sds();
-    learn_ziplist();
-    learn_quicklist();
+//    learn_sds();
+//    learn_ziplist();
+//    learn_quicklist();
+    learn_zsl();
     return 0;
 }
 
@@ -48,7 +57,7 @@ void learn_ziplist() {
         ziplistGet(p, &vstr, &vlen, &vlong);
         if (vstr) {
             printf("len : %d value: %s\n", vlen, vstr);
-        } else{
+        } else {
             printf("len : %d value: %lld\n", vlen, vlong);
         }
         p = ziplistPrev(zl, p);
@@ -75,6 +84,43 @@ void learn_quicklist() {
     println();
 }
 
+void learn_zsl() {
+
+    zskiplist *zsl = zslCreate();
+    for(int i = 2; i < 1000; i++) {
+        char str[i];
+        randomStr(str, i);
+        zslInsert(zsl, i, sdsnew(str));
+    }
+//    zslInsert(zsl, 10, sdsnew("10"));
+//    zslInsert(zsl, 17, sdsnew("17"));
+//    zslInsert(zsl, 500, sdsnew("500"));
+//    zslInsert(zsl, 11, sdsnew("11"));
+//    zslInsert(zsl, 1, sdsnew("1"));
+//    zslInsert(zsl, 600, sdsnew("600"));
+
+
+
+    zrangespec range;
+    range.max = 985;
+    range.min = 500;
+    range.minex = 1;
+    range.maxex = 0;
+    zskiplistNode *node = zslFirstInRange(zsl, &range);
+    zskiplistNode *node1 = zslLastInRange(zsl, &range);
+
+    println();
+}
+
+void randomStr(char* str, size_t len) {
+    char* chars = "abcdefghijklmnopqrstuvwxyz";
+    int position = 0;
+    str[len--] = '\0';
+    while(len--) {
+        position = random() & 25;
+        str[len] = chars[position];
+    }
+}
 
 void println() {
     printf("====================\n");
