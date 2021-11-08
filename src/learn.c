@@ -26,8 +26,8 @@ void randomStr(char* str, size_t len);
 int learn() {
 //    learn_sds();
 //    learn_ziplist();
-//    learn_quicklist();
-    learn_zsl();
+    learn_quicklist();
+//    learn_zsl();
     return 0;
 }
 

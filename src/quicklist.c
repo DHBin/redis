@@ -99,6 +99,7 @@ quicklist *quicklistCreate(void) {
     quicklist->len = 0;
     quicklist->count = 0;
     quicklist->compress = 0;
+    /* -2 意思是一个压缩链表的字节数最大是8k */
     quicklist->fill = -2;
     quicklist->bookmark_count = 0;
     return quicklist;
@@ -425,6 +426,7 @@ REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
     if (unlikely(!node))
         return 0;
 
+    /* 压缩链表节点的头部字节数 */
     int ziplist_overhead;
     /* size of previous offset */
     if (sz < 254)
