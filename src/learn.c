@@ -68,10 +68,15 @@ void learn_ziplist() {
 
 void learn_quicklist() {
     quicklist *list = quicklistCreate();
-    quicklistPushHead(list, "hello", 6);
-    quicklistPushHead(list, "xxx", 4);
-    quicklistPushHead(list, "xxxx", 5);
+//    quicklistPushHead(list, "hello", 6);
+//    quicklistPushHead(list, "xxx", 4);
+//    quicklistPushHead(list, "xxxx", 5);
 
+    for(int i = 2; i < 1000; i++) {
+        char str[i];
+        randomStr(str, i);
+        quicklistPushHead(list, str, i);
+    }
     unsigned long count = quicklistCount(list);
     printf("快速链表的长度：%lu\n", count);
     /* 快速链表迭代器 */
