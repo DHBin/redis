@@ -47,42 +47,58 @@
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
 
+/* 字典中的键值对实体 */
 typedef struct dictEntry {
+    /* 键 */
     void *key;
+    /* 值，共同体实现不同类型的存储 */
     union {
         void *val;
         uint64_t u64;
         int64_t s64;
         double d;
     } v;
+    /* 下一个实体 */
     struct dictEntry *next;
 } dictEntry;
 
 typedef struct dictType {
+    /* 计算hash值的函数 */
     uint64_t (*hashFunction)(const void *key);
+    /* 键复制函数 */
     void *(*keyDup)(void *privdata, const void *key);
+    /* 值复制函数 */
     void *(*valDup)(void *privdata, const void *obj);
+    /* 键对比函数 */
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
+    /* 键内存回收函数（析构函数） */
     void (*keyDestructor)(void *privdata, void *key);
+    /* 值内存回收函数（析构函数） */
     void (*valDestructor)(void *privdata, void *obj);
+    /* 判断是否可以扩容 */
     int (*expandAllowed)(size_t moreMem, double usedRatio);
 } dictType;
 
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
 typedef struct dictht {
+    /* 字典实体数组 */
     dictEntry **table;
+    /* table的大小 */
     unsigned long size;
+    /* 恒等于size - 1 */
     unsigned long sizemask;
+    /* table中元素数量 */
     unsigned long used;
 } dictht;
 
+/* 字典的结构体 */
 typedef struct dict {
-    dictType *type;
-    void *privdata;
+    dictType *type; /* 字典类型，封装了各种函数，多态实现 */
+    void *privdata; /* 可以理解成是扩展字段 */
     dictht ht[2];
-    long rehashidx; /* rehashing not in progress if rehashidx == -1 */
-    int16_t pauserehash; /* If >0 rehashing is paused (<0 indicates coding error) */
+    long rehashidx; /* rehashing not in progress if rehashidx == -1 rehash的进度，当不是-1的时候，表示迁移至哪个table entry的下标 */
+    int16_t pauserehash; /* If >0 rehashing is paused (<0 indicates coding error) 大于0表示rehash已停止，小于0表示出错，等于0表示正在迁移 */
 } dict;
 
 /* If safe is set to 1 this is a safe iterator, that means, you can call

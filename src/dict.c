@@ -54,7 +54,12 @@
  *
  * Note that even when dict_can_resize is set to 0, not all resizes are
  * prevented: a hash table is still allowed to grow if the ratio between
- * the number of elements and the buckets > dict_force_resize_ratio. */
+ * the number of elements and the buckets > dict_force_resize_ratio.
+ *
+ * 使用 dictEnableResize() / dictDisableResize() 可以启用或者关闭字典rehash。这对于redis来说非常
+ * 重要，因为redis使用了copy-on-write技术，不希望在子进程执行持久化的时候移动过多的内存
+ *
+ * */
 static int dict_can_resize = 1;
 static unsigned int dict_force_resize_ratio = 5;
 
@@ -107,8 +112,10 @@ static void _dictReset(dictht *ht)
 dict *dictCreate(dictType *type,
         void *privDataPtr)
 {
+    /* 分配内存 */
     dict *d = zmalloc(sizeof(*d));
 
+    /* 初始化hash表 */
     _dictInit(d,type,privDataPtr);
     return d;
 }
@@ -117,7 +124,9 @@ dict *dictCreate(dictType *type,
 int _dictInit(dict *d, dictType *type,
         void *privDataPtr)
 {
+    /* 初始化hash表1，置零 */
     _dictReset(&d->ht[0]);
+    /* 初始化hash表2，置零 */
     _dictReset(&d->ht[1]);
     d->type = type;
     d->privdata = privDataPtr;
@@ -142,6 +151,7 @@ int dictResize(dict *d)
 /* Expand or create the hash table,
  * when malloc_failed is non-NULL, it'll avoid panic if malloc fails (in which case it'll be set to 1).
  * Returns DICT_OK if expand was performed, and DICT_ERR if skipped. */
+/* 扩容或者创建hash表 */
 int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
 {
     if (malloc_failed) *malloc_failed = 0;
@@ -152,14 +162,17 @@ int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
         return DICT_ERR;
 
     dictht n; /* the new hash table */
+    /* 计算真实的大小 */
     unsigned long realsize = _dictNextPower(size);
 
     /* Rehashing to the same table size is not useful. */
+    /* 扩容后的大小 == 原来hash的大小，直接返回 */
     if (realsize == d->ht[0].size) return DICT_ERR;
 
     /* Allocate the new hash table and initialize all pointers to NULL */
     n.size = realsize;
     n.sizemask = realsize-1;
+    /* 分配内存 */
     if (malloc_failed) {
         n.table = ztrycalloc(realsize*sizeof(dictEntry*));
         *malloc_failed = n.table == NULL;
@@ -168,16 +181,21 @@ int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
     } else
         n.table = zcalloc(realsize*sizeof(dictEntry*));
 
+    /* 已使用空间置零 */
     n.used = 0;
 
     /* Is this the first initialization? If so it's not really a rehashing
      * we just set the first hash table so that it can accept keys. */
+    /* 刚创建出来的dict的table为NULL，所以判断这不需要rehash，所以直接把新建的table
+     * 赋值到ht[0]中
+     * */
     if (d->ht[0].table == NULL) {
         d->ht[0] = n;
         return DICT_OK;
     }
 
     /* Prepare a second hash table for incremental rehashing */
+    /* 把新建的table放在ht[1]中，并把rehashidx设置为0（标识rehash状态） */
     d->ht[1] = n;
     d->rehashidx = 0;
     return DICT_OK;
@@ -203,7 +221,9 @@ int dictTryExpand(dict *d, unsigned long size) {
  * since part of the hash table may be composed of empty spaces, it is not
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
- * work it does would be unbound and the function may block for a long time. */
+ * work it does would be unbound and the function may block for a long time.
+ * 执行增量迁移数据，n是迁移多少个链表（桶）
+ * */
 int dictRehash(dict *d, int n) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
     if (!dictIsRehashing(d)) return 0;
@@ -214,25 +234,35 @@ int dictRehash(dict *d, int n) {
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
         assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        /* 确定rehash idx */
         while(d->ht[0].table[d->rehashidx] == NULL) {
             d->rehashidx++;
             if (--empty_visits == 0) return 1;
         }
+        /* 取出需要迁移的entry */
         de = d->ht[0].table[d->rehashidx];
         /* Move all the keys in this bucket from the old to the new hash HT */
+        /* 迁移bucket中的所有key到新的hash table中 */
         while(de) {
             uint64_t h;
 
             nextde = de->next;
             /* Get the index in the new hash table */
+            /* 在新的hash表中获取下标位置 */
             h = dictHashKey(d, de->key) & d->ht[1].sizemask;
+            /* 头插法 */
             de->next = d->ht[1].table[h];
             d->ht[1].table[h] = de;
+            /* 旧的数量-1 */
             d->ht[0].used--;
+            /* 新的数量+1 */
             d->ht[1].used++;
+            /* 作用遍历下个entry */
             de = nextde;
         }
+        /* 把原来的hash table置零 */
         d->ht[0].table[d->rehashidx] = NULL;
+        /* 更新rehash的进度 */
         d->rehashidx++;
     }
 
@@ -258,7 +288,9 @@ long long timeInMilliseconds(void) {
 
 /* Rehash in ms+"delta" milliseconds. The value of "delta" is larger 
  * than 0, and is smaller than 1 in most cases. The exact upper bound 
- * depends on the running time of dictRehash(d,100).*/
+ * depends on the running time of dictRehash(d,100).
+ * 在ms毫秒内多次执行dictRehash(d,100)
+ * */
 int dictRehashMilliseconds(dict *d, int ms) {
     if (d->pauserehash > 0) return 0;
 
@@ -318,10 +350,12 @@ dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing)
     dictEntry *entry;
     dictht *ht;
 
+    /* 判断是否在rehash状态，是的话执行迁移1个bucket */
     if (dictIsRehashing(d)) _dictRehashStep(d);
 
     /* Get the index of the new element, or -1 if
      * the element already exists. */
+    /* 计算新插入元素的下标，如果key已经存在直接返回 */
     if ((index = _dictKeyIndex(d, key, dictHashKey(d,key), existing)) == -1)
         return NULL;
 
@@ -329,6 +363,7 @@ dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing)
      * Insert the element in top, with the assumption that in a database
      * system it is more likely that recently added entries are accessed
      * more frequently. */
+    /* 判断字典是否在rehash，如果是的话，直接存进新的hash table中 */
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
     entry = zmalloc(sizeof(*entry));
     entry->next = ht->table[index];
@@ -391,6 +426,7 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
 
     if (d->ht[0].used == 0 && d->ht[1].used == 0) return NULL;
 
+    /* rehash */
     if (dictIsRehashing(d)) _dictRehashStep(d);
     h = dictHashKey(d, key);
 
@@ -502,8 +538,10 @@ dictEntry *dictFind(dict *d, const void *key)
     uint64_t h, idx, table;
 
     if (dictSize(d) == 0) return NULL; /* dict is empty */
+    /* 如果是在rehash，迁移一个bucket */
     if (dictIsRehashing(d)) _dictRehashStep(d);
     h = dictHashKey(d, key);
+    /* 下面的步骤就是从两个hash table中找出key的value */
     for (table = 0; table <= 1; table++) {
         idx = h & d->ht[table].sizemask;
         he = d->ht[table].table[idx];
@@ -991,6 +1029,9 @@ static int _dictExpandIfNeeded(dict *d)
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
+    /*
+     * 表中的元素数量大于表的数组大小 && (是否允许rehash || 表中的元素数量除于表的数组大小 > 5) && 自定义是否允许扩展函数返回True
+     * */
     if (d->ht[0].used >= d->ht[0].size &&
         (dict_can_resize ||
          d->ht[0].used/d->ht[0].size > dict_force_resize_ratio) &&
@@ -1007,6 +1048,7 @@ static unsigned long _dictNextPower(unsigned long size)
     unsigned long i = DICT_HT_INITIAL_SIZE;
 
     if (size >= LONG_MAX) return LONG_MAX + 1LU;
+    /* 返回大于等于size的2的倍数的值 */
     while(1) {
         if (i >= size)
             return i;

@@ -6,6 +6,7 @@
 #include "ziplist.h"
 #include "sds.h"
 #include "server.h"
+#include "dict.h"
 
 void learn_sds();
 
@@ -18,6 +19,9 @@ void learn_quicklist();
 /* 跳跃表 */
 void learn_zsl();
 
+/* 字典 */
+void learn_dict();
+
 // =========util=========
 void println();
 void randomStr(char* str, size_t len);
@@ -26,8 +30,9 @@ void randomStr(char* str, size_t len);
 int learn() {
 //    learn_sds();
 //    learn_ziplist();
-    learn_quicklist();
+    // learn_quicklist();
 //    learn_zsl();
+    learn_dict();
     return 0;
 }
 
@@ -115,6 +120,26 @@ void learn_zsl() {
     zskiplistNode *node1 = zslLastInRange(zsl, &range);
 
     println();
+}
+
+void learn_dict() {
+    dict *myDict = dictCreate(&hashDictType, NULL);
+    /* 空扩容 */
+    printf("expand ret: %d\n", dictExpand(myDict, 100));
+    /* 向字典添加数据，返回0代表成功，否则失败*/
+    int ret = dictAdd(myDict, "dhb", "binary");
+    printf("want to add 'dhb'-> 'binary' to dict. ret: %d\n", ret);
+
+    /* 根据key查找value值 */
+    void *value = dictFetchValue(myDict, "dhb");
+    printf("value: %s\n", value);
+
+    println();
+    /* 根据key查找value值，返回的是dictEntry */
+    dictEntry *valueEntry = dictFind(myDict, "dhb");
+    printf("key: %s\n", valueEntry->key);
+    printf("value: %s\n", valueEntry->v.val);
+
 }
 
 void randomStr(char* str, size_t len) {
