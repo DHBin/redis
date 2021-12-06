@@ -58,10 +58,7 @@
 #include <locale.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
-
-#ifdef LEARN_REDIS
 #include "learn.h"
-#endif
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -6180,7 +6177,6 @@ redisTestProc *getTestProcByName(const char *name) {
 }
 #endif
 
-#ifndef LEARN_REDIS
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
@@ -6277,6 +6273,8 @@ int main(int argc, char **argv) {
         redis_check_rdb_main(argc,argv,NULL);
     else if (strstr(argv[0],"redis-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
+    else if (strstr(argv[0], "learn") != NULL)
+        learn();
 
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
@@ -6444,10 +6442,4 @@ int main(int argc, char **argv) {
     aeDeleteEventLoop(server.el);
     return 0;
 }
-#else
-int main(int argc, char **argv) {
-    return learn();
-}
-#endif
-
 /* The End */

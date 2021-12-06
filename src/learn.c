@@ -33,6 +33,7 @@ int learn() {
     // learn_quicklist();
 //    learn_zsl();
     learn_dict();
+    exit(0);
     return 0;
 }
 
