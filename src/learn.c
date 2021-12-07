@@ -22,6 +22,9 @@ void learn_zsl();
 /* 字典 */
 void learn_dict();
 
+/* 整数集合 */
+void learn_intset();
+
 // =========util=========
 void println();
 void randomStr(char* str, size_t len);
@@ -32,7 +35,8 @@ int learn() {
 //    learn_ziplist();
     // learn_quicklist();
 //    learn_zsl();
-    learn_dict();
+//    learn_dict();
+    learn_intset();
     exit(0);
     return 0;
 }
@@ -141,6 +145,31 @@ void learn_dict() {
     printf("key: %s\n", valueEntry->key);
     printf("value: %s\n", valueEntry->v.val);
 
+}
+
+void learn_intset() {
+    intset *is = intsetNew();
+    uint8_t ret;
+    is = intsetAdd(is, 1, &ret);
+    printf("添加1到整数集合中的结果: %d\n", ret);
+
+    // int16 临界值
+    is = intsetAdd(is, INT16_MAX - 1, &ret);
+    // 升级到int32
+    is = intsetAdd(is, INT16_MAX, &ret);
+    // int32 临界值
+    is = intsetAdd(is, INT32_MAX - 1, &ret);
+    // 升级到int64
+    is = intsetAdd(is, INT32_MAX, &ret);
+
+    // 中间插入
+    is = intsetAdd(is, 3, &ret);
+
+    intsetAdd(i)
+
+    ret = intsetFind(is, 1);
+    printf("在整数集合中查找1的结果: %d\n", ret);
+    println();
 }
 
 void randomStr(char* str, size_t len) {
