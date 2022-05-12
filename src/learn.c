@@ -25,6 +25,9 @@ void learn_dict();
 /* 整数集合 */
 void learn_intset();
 
+/* 紧凑列表 */
+void learn_listpack();
+
 // =========util=========
 void println();
 void randomStr(char* str, size_t len);
@@ -36,7 +39,8 @@ int learn() {
     // learn_quicklist();
 //    learn_zsl();
 //    learn_dict();
-    learn_intset();
+//    learn_intset();
+    learn_listpack();
     exit(0);
     return 0;
 }
@@ -165,11 +169,25 @@ void learn_intset() {
     // 中间插入
     is = intsetAdd(is, 3, &ret);
 
-    intsetAdd(i)
-
     ret = intsetFind(is, 1);
     printf("在整数集合中查找1的结果: %d\n", ret);
     println();
+}
+
+/*
+ * 紧凑链表的出现是为了解决压缩链表中更新链表的时候会出现级联更新的问题
+ * */
+void learn_listpack() {
+    unsigned char *lp = lpNew(32);
+    lp = lpAppend(lp, "hello", 6);
+    lp = lpAppend(lp, "world", 6);
+    uint32_t len = lpLength(lp);
+    printf("len: %d\n", len);
+    unsigned char *first = lpFirst(lp);
+    printf("ele: %s\n", first);
+    first = lpNext(lp, first);
+    printf("ele: %s\n", first);
+
 }
 
 void randomStr(char* str, size_t len) {

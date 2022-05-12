@@ -648,7 +648,11 @@ unsigned char *lpGet(unsigned char *p, int64_t *count, unsigned char *intbuf) {
  *
  * For deletion operations ('ele' set to NULL) 'newp' is set to the next
  * element, on the right of the deleted one, or to NULL if the deleted element
- * was the last one. */
+ * was the last one.
+ *
+ * 插入、删除、替换的实现都是这个函数，当ele是NULL时，表示移除*p位置的元素,
+ * p也是一个基准位置，在这个节点之前、之后插入等等
+ * */
 unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, unsigned char *p, int where, unsigned char **newp) {
     unsigned char intenc[LP_MAX_INT_ENCODING_LEN];
     unsigned char backlen[LP_MAX_BACKLEN_SIZE];
@@ -658,12 +662,17 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
     /* An element pointer set to NULL means deletion, which is conceptually
      * replacing the element with a zero-length element. So whatever we
      * get passed as 'where', set it to LP_REPLACE. */
+    /* 如果ele是NULL，默认该操作是删除 */
     if (ele == NULL) where = LP_REPLACE;
 
     /* If we need to insert after the current element, we just jump to the
      * next element (that could be the EOF one) and handle the case of
      * inserting before. So the function will actually deal with just two
-     * cases: LP_BEFORE and LP_REPLACE. */
+     * cases: LP_BEFORE and LP_REPLACE.
+     *
+     * 如果需要在列表中已存在的元素之前插入数据，我们先找到这已存在的元素的位置，
+     * 然后按在之后插入处理
+     * */
     if (where == LP_AFTER) {
         p = lpSkip(p);
         where = LP_BEFORE;
@@ -684,6 +693,11 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
      * length of the encoded element. */
     int enctype;
     if (ele) {
+        /*
+         * enctype: 数据类型，0-int 1-字符串
+         * intenc:  当enctype为0时，该值有用，表示编码后的int64
+         * enclen:  编码长度
+         * */
         enctype = lpEncodeGetType(ele,size,intenc,&enclen);
     } else {
         enctype = -1;
@@ -693,6 +707,7 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
     /* We need to also encode the backward-parsable length of the element
      * and append it to the end: this allows to traverse the listpack from
      * the end to the start. */
+    /* 计算出元素尾部的长度的字节长度 */
     unsigned long backlen_size = ele ? lpEncodeBacklen(backlen,enclen) : 0;
     uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
     uint32_t replaced_len  = 0;
@@ -747,8 +762,10 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
     }
     if (ele) {
         if (enctype == LP_ENCODING_INT) {
+            /* 因为int类型在lpEncodeGetType函数中已经编码好了，所以直接拷贝到内存中 */
             memcpy(dst,intenc,enclen);
         } else {
+            /* 对字符串类型的数据编码 */
             lpEncodeString(dst,ele,size);
         }
         dst += enclen;
@@ -756,7 +773,7 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
         dst += backlen_size;
     }
 
-    /* Update header. */
+    /* Update header. 更新紧凑链表的头部信息 */
     if (where != LP_REPLACE || ele == NULL) {
         uint32_t num_elements = lpGetNumElements(lp);
         if (num_elements != LP_HDR_NUMELE_UNKNOWN) {
@@ -794,7 +811,9 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
  * listpack. It is implemented in terms of lpInsert(), so the return value is
  * the same as lpInsert(). */
 unsigned char *lpAppend(unsigned char *lp, unsigned char *ele, uint32_t size) {
+    /* 获取当前列表的字节长度 */
     uint64_t listpack_bytes = lpGetTotalBytes(lp);
+    /* eof标识位置 */
     unsigned char *eofptr = lp + listpack_bytes - 1;
     return lpInsert(lp,ele,size,eofptr,LP_BEFORE,NULL);
 }
