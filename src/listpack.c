@@ -226,8 +226,11 @@ int lpStringToInt64(const char *s, unsigned long slen, int64_t *value) {
 unsigned char *lpNew(size_t capacity) {
     unsigned char *lp = lp_malloc(capacity > LP_HDR_SIZE+1 ? capacity : LP_HDR_SIZE+1);
     if (lp == NULL) return NULL;
+    /* 设置lp的字节大小，在前4个字节保存，32位 */
     lpSetTotalBytes(lp,LP_HDR_SIZE+1);
+    /* 设置元素的个数，在前5、6个字节 */
     lpSetNumElements(lp,0);
+    /* 设置第7个字节为0xFF，标识为结束位 */
     lp[LP_HDR_SIZE] = LP_EOF;
     return lp;
 }
@@ -695,7 +698,7 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
     if (ele) {
         /*
          * enctype: 数据类型，0-int 1-字符串
-         * intenc:  当enctype为0时，该值有用，表示编码后的int64
+         * intenc:  当enctype为0时，该值有用，表示编码后的int
          * enclen:  编码长度
          * */
         enctype = lpEncodeGetType(ele,size,intenc,&enclen);
@@ -709,10 +712,13 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
      * the end to the start. */
     /* 计算出元素尾部的长度的字节长度 */
     unsigned long backlen_size = ele ? lpEncodeBacklen(backlen,enclen) : 0;
+    /* 旧的列表字节总长度 */
     uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
     uint32_t replaced_len  = 0;
     if (where == LP_REPLACE) {
+        /* [头部][数据]的长度 */
         replaced_len = lpCurrentEncodedSizeUnsafe(p);
+        /* [尾部长度]：代表前面数据的长度 */
         replaced_len += lpEncodeBacklen(NULL,replaced_len);
         ASSERT_INTEGRITY_LEN(lp, p, replaced_len);
     }
