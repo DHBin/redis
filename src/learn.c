@@ -180,6 +180,7 @@ void learn_intset() {
 void learn_listpack() {
     unsigned char *lp = lpNew(32);
     lp = lpAppend(lp, "hello", 6);
+    lpLast(lp);
     lp = lpAppend(lp, "world", 6);
     uint32_t len = lpLength(lp);
     printf("len: %d\n", len);

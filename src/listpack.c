@@ -336,11 +336,11 @@ unsigned long lpEncodeBacklen(unsigned char *buf, uint64_t l) {
             buf[1] = (l&127)|128;
         }
         return 2;
-    } else if (l < 2097151) {
+    } else if (l < 2097151) { // 21位 0001 1111 1111 1111 1111 1111
         if (buf) {
-            buf[0] = l>>14;
-            buf[1] = ((l>>7)&127)|128;
-            buf[2] = (l&127)|128;
+            buf[0] = l>>14; // 21-14=7, 前7位
+            buf[1] = ((l>>7)&127)|128; // 前8~14位
+            buf[2] = (l&127)|128; // 15~21位
         }
         return 3;
     } else if (l < 268435455) {
@@ -369,7 +369,9 @@ uint64_t lpDecodeBacklen(unsigned char *p) {
     uint64_t val = 0;
     uint64_t shift = 0;
     do {
+        /* 从后面向前遍历 */
         val |= (uint64_t)(p[0] & 127) << shift;
+        /* 直到第一位的时候，是没有与128或操作的，所以能够通过下面这个方式来判定结束，也是挺妙的 */
         if (!(p[0] & 128)) break;
         shift += 7;
         p--;
@@ -699,7 +701,7 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
         /*
          * enctype: 数据类型，0-int 1-字符串
          * intenc:  当enctype为0时，该值有用，表示编码后的int
-         * enclen:  编码长度
+         * enclen:  数据长度 内存结构：（标识 | 数据长度 | 数据）
          * */
         enctype = lpEncodeGetType(ele,size,intenc,&enclen);
     } else {
@@ -710,7 +712,7 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
     /* We need to also encode the backward-parsable length of the element
      * and append it to the end: this allows to traverse the listpack from
      * the end to the start. */
-    /* 计算出元素尾部的长度的字节长度 */
+    /* 计算出元素尾部的长度的字节长度，同时构建好backlen */
     unsigned long backlen_size = ele ? lpEncodeBacklen(backlen,enclen) : 0;
     /* 旧的列表字节总长度 */
     uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
@@ -723,6 +725,11 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *ele, uint32_t size, un
         ASSERT_INTEGRITY_LEN(lp, p, replaced_len);
     }
 
+    /* 新的列表字节长度
+     * old_listpack_bytes：旧的列表字节数
+     * enclen：元素数据编码后的字节数
+     * backlen_size：储存尾部长度的字节数
+     * */
     uint64_t new_listpack_bytes = old_listpack_bytes + enclen + backlen_size
                                   - replaced_len;
     if (new_listpack_bytes > UINT32_MAX) return NULL;
