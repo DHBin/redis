@@ -355,7 +355,10 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
  * flushed ASAP, and will try to do that in the serverCron() function.
  *
  * However if force is set to 1 we'll write regardless of the background
- * fsync. */
+ * fsync.
+ *
+ * 处理aof刷盘函数
+ * */
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
@@ -664,7 +667,9 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
 
     /* Append to the AOF buffer. This will be flushed on disk just before
      * of re-entering the event loop, so before the client will get a
-     * positive reply about the operation performed. */
+     * positive reply about the operation performed.
+     * 追加命令到aof_buf中，下次定时任务刷盘
+     * */
     if (server.aof_state == AOF_ON)
         server.aof_buf = sdscatlen(server.aof_buf,buf,sdslen(buf));
 

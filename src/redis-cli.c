@@ -2721,6 +2721,7 @@ static void freeClusterManager(void) {
         dictRelease(clusterManagerUncoveredSlots);
 }
 
+/* ip地址，端口创建一个集群管理节点对象 */
 static clusterManagerNode *clusterManagerNewNode(char *ip, int port) {
     clusterManagerNode *node = zmalloc(sizeof(*node));
     node->context = NULL;
@@ -2816,9 +2817,11 @@ cleanup:
 
 static int clusterManagerNodeConnect(clusterManagerNode *node) {
     if (node->context) redisFree(node->context);
+    /* 连接redis节点 */
     node->context = redisConnect(node->ip, node->port);
     if (!node->context->err && config.tls) {
         const char *err = NULL;
+        /* 配置中开启了tls，使用tls重连 */
         if (cliSecureConnection(node->context, config.sslconfig, &err) == REDIS_ERR && err) {
             fprintf(stderr,"TLS Error: %s\n", err);
             redisFree(node->context);
@@ -2838,7 +2841,9 @@ static int clusterManagerNodeConnect(clusterManagerNode *node) {
      * in order to prevent timeouts caused by the execution of long
      * commands. At the same time this improves the detection of real
      * errors. */
+    /* 对socket设置keepalive，15s发送一次 */
     anetKeepAlive(NULL, node->context->fd, REDIS_CLI_KEEPALIVE_INTERVAL);
+    /* 鉴权 */
     if (config.auth) {
         redisReply *reply;
         if (config.user == NULL)
@@ -2945,7 +2950,9 @@ static int clusterManagerNodeIsCluster(clusterManagerNode *node, char **err) {
 }
 
 /* Checks whether the node is empty. Node is considered not-empty if it has
- * some key or if it already knows other nodes */
+ * some key or if it already knows other nodes
+ * 检查节点是否为空，如果节点包含key或者已经发现其他节点则判断不为空
+ * */
 static int clusterManagerNodeIsEmpty(clusterManagerNode *node, char **err) {
     redisReply *info = clusterManagerGetNodeRedisInfo(node, err);
     int is_empty = 1;
@@ -5606,7 +5613,9 @@ cluster_manager_err:
 }
 
 /* Cluster Manager Commands */
-
+/* 初始化集群命令
+ * redis-cli --cluster create 127.0.0.1:6379 127.0.0.2:6379 --cluster-replicas 1
+ * */
 static int clusterManagerCommandCreate(int argc, char **argv) {
     int i, j, success = 1;
     cluster_manager.nodes = listCreate();
@@ -5623,11 +5632,13 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
         char *ip = addr;
         int port = atoi(++c);
         clusterManagerNode *node = clusterManagerNewNode(ip, port);
+        /* 创建连接 */
         if (!clusterManagerNodeConnect(node)) {
             freeClusterManagerNode(node);
             return 0;
         }
         char *err = NULL;
+        /* 检查是否开启集群检查配置，cluster-enabled yes */
         if (!clusterManagerNodeIsCluster(node, &err)) {
             clusterManagerPrintNotClusterNodeError(node, err);
             if (err) zfree(err);
@@ -5635,6 +5646,7 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
             return 0;
         }
         err = NULL;
+        /* 加载节点信息，节点id等信息 */
         if (!clusterManagerNodeLoadInfo(node, 0, &err)) {
             if (err) {
                 CLUSTER_MANAGER_PRINT_REPLY_ERROR(node, err);
@@ -5644,6 +5656,7 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
             return 0;
         }
         err = NULL;
+        /* 检查节点是否为空 */
         if (!clusterManagerNodeIsEmpty(node, &err)) {
             clusterManagerPrintNotEmptyNodeError(node, err);
             if (err) zfree(err);
@@ -5654,6 +5667,7 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
     }
     int node_len = cluster_manager.nodes->len;
     int replicas = config.cluster_manager_command.replicas;
+    /* 计算master的节点数，公式：总节点数 / (从节点数 + 1) */
     int masters_count = CLUSTER_MANAGER_MASTERS_COUNT(node_len, replicas);
     if (masters_count < 3) {
         clusterManagerLogErr(
@@ -5668,12 +5682,16 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
     clusterManagerLogInfo(">>> Performing hash slots allocation "
                           "on %d nodes...\n", node_len);
     int interleaved_len = 0, ip_count = 0;
+    /* 初始化clusterManagerNode数组，大小是clusterManagerNode结构体的字节数 */
     clusterManagerNode **interleaved = zcalloc(node_len*sizeof(**interleaved));
+    /* 初始化ip数据，大小是节点的个数 */
     char **ips = zcalloc(node_len * sizeof(char*));
+    /* 收集同ip的clusterManagerNode */
     clusterManagerNodeArray *ip_nodes = zcalloc(node_len * sizeof(*ip_nodes));
     listIter li;
     listNode *ln;
     listRewind(cluster_manager.nodes, &li);
+    /* 整个while的逻辑就是遍历所有节点，把相同的ip节点放到一个clusterManagerNodeArray中 */
     while ((ln = listNext(&li)) != NULL) {
         clusterManagerNode *n = ln->value;
         int found = 0;
@@ -5692,6 +5710,17 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
             clusterManagerNodeArrayInit(node_array, node_len);
         clusterManagerNodeArrayAdd(node_array, n);
     }
+    /*
+     * 交替设置interleaved的值，
+     * 例子：
+     * [
+     *  [127.0.0.1:8001, 127.0.0.1:8002],
+     *  [127.0.0.3:8001, 127.0.0.3:8002],
+     *  [127.0.0.4:8001, 127.0.0.4:8002]
+     * ]
+     * 上面的数据ip_count为3，node_len为6，最终
+     * 生成到interleaved为[127.0.0.1:8001, 127.0.0.3:8001, 127.0.0.4:8001, 127.0.0.1:8002, 127.0.0.3:8002, 127.0.0.4:8002]
+     * */
     while (interleaved_len < node_len) {
         for (i = 0; i < ip_count; i++) {
             clusterManagerNodeArray *node_array = &(ip_nodes[i]);
@@ -5702,14 +5731,25 @@ static int clusterManagerCommandCreate(int argc, char **argv) {
             }
         }
     }
+    /* 把节点间隔开后把指针给masters */
     clusterManagerNode **masters = interleaved;
+    /* master指针移动masters_count位 */
     interleaved += masters_count;
     interleaved_len -= masters_count;
+    /* 一个节点占多少个槽
+     * 假设3个master节点，slots_per_node的值5461.3335
+     * */
     float slots_per_node = CLUSTER_MANAGER_SLOTS / (float) masters_count;
     long first = 0;
     float cursor = 0.0f;
+    /* 为master分配槽 */
     for (i = 0; i < masters_count; i++) {
         clusterManagerNode *master = masters[i];
+        /* lround函数作用：四舍五入返回long类型
+         * i = 0时，last = 5460，first = 0
+         * i = 1时，last = 5461.3335+5461.3335-1(10922)，first = 5461
+         * i = 2时，last = 10922.667+5461.3335-1(16380但是是最后一个节点，补全到16383)，first = 10921
+         * */
         long last = lround(cursor + slots_per_node - 1);
         if (last > CLUSTER_MANAGER_SLOTS || i == (masters_count - 1))
             last = CLUSTER_MANAGER_SLOTS - 1;
@@ -5785,6 +5825,7 @@ assign_replicas:
         while ((ln = listNext(&li)) != NULL) {
             clusterManagerNode *node = ln->value;
             char *err = NULL;
+            /* 1.为master节点添加slots，为replicate节点管理master节点 */
             int flushed = clusterManagerFlushNodeConfig(node, &err);
             if (!flushed && node->dirty && !node->replicate) {
                 if (err != NULL) {
@@ -5803,6 +5844,7 @@ assign_replicas:
         while ((ln = listNext(&li)) != NULL) {
             clusterManagerNode *node = ln->value;
             redisReply *reply = NULL;
+            /* 2.设置不同的epoch */
             reply = CLUSTER_MANAGER_COMMAND(node,
                                             "cluster set-config-epoch %d",
                                             config_epoch++);
@@ -5819,6 +5861,7 @@ assign_replicas:
                 continue;
             }
             redisReply *reply = NULL;
+            /* 3.执行cluster meet使得节点关联起来 */
             reply = CLUSTER_MANAGER_COMMAND(node, "cluster meet %s %d",
                                             first->ip, first->port);
             int is_err = 0;

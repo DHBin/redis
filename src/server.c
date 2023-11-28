@@ -58,6 +58,7 @@
 #include <locale.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
+#include "learn.h"
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -2382,9 +2383,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* Handle precise timeouts of blocked clients. */
+    /* 处理客户端阻塞指令（BLPOP、XREAD、BZPOP）、数据同步等待、模块加载阻塞超时 */
     handleBlockedClientsTimeout();
 
     /* We should handle pending reads clients ASAP after event loop. */
+    /* 处理客户端发来的指令 */
     handleClientsWithPendingReadsUsingThreads();
 
     /* Handle TLS pending data. (must be done before flushAppendOnlyFile) */
@@ -2415,6 +2418,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Try to process pending commands for clients that were just unblocked. */
     if (listLength(server.unblocked_clients))
+        /* 处理客户端发来的命令 */
         processUnblockedClients();
 
     /* Send all the slaves an ACK request if at least one client blocked
@@ -2455,9 +2459,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         flushAppendOnlyFile(0);
 
     /* Handle writes with pending output buffers. */
+    /* 向客户端写数据 */
     handleClientsWithPendingWritesUsingThreads();
 
     /* Close clients that need to be closed asynchronous */
+    /* 关闭客户端 */
     freeClientsInAsyncFreeQueue();
 
     /* Try to process blocked clients every once in while. Example: A module
@@ -2758,6 +2764,7 @@ void initServerConfig(void) {
      * redis.conf using the rename-command directive. */
     server.commands = dictCreate(&commandTableDictType,NULL);
     server.orig_commands = dictCreate(&commandTableDictType,NULL);
+    // 初始化命令列表 server.commands
     populateCommandTable();
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
@@ -3097,7 +3104,9 @@ int listenToPort(int port, socketFds *sfd) {
             closeSocketListeners(sfd);
             return C_ERR;
         }
+        // 设置成非阻塞
         anetNonBlock(NULL,sfd->fd[sfd->count]);
+        // 添加文件描述符 FD_CLOEXEC 标识，在子进程中自动关闭
         anetCloexec(sfd->fd[sfd->count]);
         sfd->count++;
     }
@@ -3163,7 +3172,9 @@ void initServer(void) {
 
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
+    // 信号处理，接收到关闭信号、异常信号逻辑
     setupSignalHandlers();
+    // 设置线程被取消的时候，立即退出
     makeThreadKillable();
 
     if (server.syslog_enabled) {
@@ -3209,10 +3220,13 @@ void initServer(void) {
         exit(1);
     }
 
+    // 创建共享对象，节省内存开销
     createSharedObjects();
+    // 调整文件句柄数
     adjustOpenFilesLimit();
     const char *clk_msg = monotonicInit();
     serverLog(LL_NOTICE, "monotonic clock: %s", clk_msg);
+    // 创建事件容器 比如 epoll_create
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -3220,6 +3234,7 @@ void initServer(void) {
             strerror(errno));
         exit(1);
     }
+    // 分配db内存
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
@@ -3237,6 +3252,7 @@ void initServer(void) {
     }
 
     /* Open the listening Unix domain socket. */
+    /* 创建unix socket */
     if (server.unixsocket != NULL) {
         unlink(server.unixsocket); /* don't care if this fails */
         server.sofd = anetUnixServer(server.neterr,server.unixsocket,
@@ -3322,6 +3338,7 @@ void initServer(void) {
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
      * expired keys and so forth. */
+    /* 创建定时器，处理客户端超时，移除过期key、字典的rehash等等 */
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
@@ -3329,6 +3346,7 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
+    /* 创建tcp、unix domain sockets连接事件处理 */
     if (createSocketAcceptHandler(&server.ipfd, acceptTcpHandler) != C_OK) {
         serverPanic("Unrecoverable error creating TCP socket accept handler.");
     }
@@ -3350,7 +3368,9 @@ void initServer(void) {
 
     /* Register before and after sleep handlers (note this needs to be done
      * before loading persistence since it is used by processEventsWhileBlocked. */
+    /* 设置事件处理前执行的代码 */
     aeSetBeforeSleepProc(server.el,beforeSleep);
+    /* 设置事件处理后执行的代码 */
     aeSetAfterSleepProc(server.el,afterSleep);
 
     /* Open the AOF file if needed. */
@@ -3376,11 +3396,15 @@ void initServer(void) {
 
     if (server.cluster_enabled) clusterInit();
     replicationScriptCacheInit();
+    /* 初始化lua脚本 */
     scriptingInit(1);
+    /* 初始化慢查询日志 */
     slowlogInit();
+    /* 初始化latency Monitor */
     latencyMonitorInit();
     
     /* Initialize ACL default password if it exists */
+    /* 初始化acl */
     ACLUpdateDefaultUserPassword(server.requirepass);
 }
 
@@ -4286,6 +4310,7 @@ int processCommand(client *c) {
     }
 
     /* Exec the command */
+    /* 执行命令 */
     if (c->flags & CLIENT_MULTI &&
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand &&
@@ -5630,7 +5655,9 @@ void createPidFile(void) {
 void daemonize(void) {
     int fd;
 
+    // 如果子线程启动成功，结束父进程
     if (fork() != 0) exit(0); /* parent exits */
+    // 后台运行
     setsid(); /* create a new session */
 
     /* Every output goes to /dev/null. If Redis is daemonized but
@@ -5993,6 +6020,7 @@ int checkForSentinelMode(int argc, char **argv) {
 }
 
 /* Function called at startup to load RDB or AOF file in memory. */
+/* 加载rdb或者aof文件到内存里 */
 void loadDataFromDisk(void) {
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
@@ -6001,6 +6029,7 @@ void loadDataFromDisk(void) {
     } else {
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         errno = 0; /* Prevent a stale value from affecting error checking */
+        /* 加载rdb文件到内存 */
         if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_NONE) == C_OK) {
             serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
                 (float)(ustime()-start)/1000000);
@@ -6322,6 +6351,8 @@ int main(int argc, char **argv) {
         redis_check_rdb_main(argc,argv,NULL);
     else if (strstr(argv[0],"redis-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
+    else if (strstr(argv[0], "learn") != NULL)
+        learn();
 
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
@@ -6382,6 +6413,10 @@ int main(int argc, char **argv) {
     if (server.sentinel_mode) sentinelCheckConfigFile();
     server.supervised = redisIsSupervised(server.supervised_mode);
     int background = server.daemonize && !server.supervised;
+    /*
+     * 脱离终端，后台运行
+     * $ redis-server --daemonize yes
+     * */
     if (background) daemonize();
 
     serverLog(LL_WARNING, "oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo");
@@ -6399,9 +6434,15 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING, "Configuration loaded");
     }
 
+    // 读取系统的oom机制
     readOOMScoreAdj();
+    // 初始化服务器
     initServer();
+    // 如果是后台运行，或者是指定了pidfile，就创建pid文件
+    // 默认是/var/run/redis.pid
+    // 如果想杀死redis可以使用kill -15 `cat /var/run/redis.pid`
     if (background || server.pidfile) createPidFile();
+    // 设置进程名
     if (server.set_proc_title) redisSetProcTitle(NULL);
     redisAsciiArt();
     checkTcpBacklogSettings();
@@ -6431,7 +6472,9 @@ int main(int argc, char **argv) {
         moduleInitModulesSystemLast();
         moduleLoadFromQueue();
         ACLLoadUsersAtStartup();
+        /* bio、io线程的启动 */
         InitServerLast();
+        /* 加载持久化数据到内存 */
         loadDataFromDisk();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
@@ -6471,9 +6514,10 @@ int main(int argc, char **argv) {
     redisSetCpuAffinity(server.server_cpulist);
     setOOMScoreAdj(-1);
 
+    /* aeMain函数是一个死循环，阻塞在这里，不断地查询事件容器中是否存在事件 */
     aeMain(server.el);
+    /* aeMain退出,回收事件容器 */
     aeDeleteEventLoop(server.el);
     return 0;
 }
-
 /* The End */

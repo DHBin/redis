@@ -32,20 +32,30 @@
 #define __INTSET_H
 #include <stdint.h>
 
+/* 整数集合的数据结构 */
 typedef struct intset {
-    uint32_t encoding;
-    uint32_t length;
-    int8_t contents[];
+    uint32_t encoding; /* 编码，该编码决定了contents数组的int类型，支持16位、32位、64位 */
+    uint32_t length; /* 元素长度 */
+    int8_t contents[]; /* 元素，元素的类型不是int8_t，而是根据encoding动态强制转换 */
 } intset;
 
+/* 初始化一个整数集合 */
 intset *intsetNew(void);
+/* 向整数集合中添加一个整数 */
 intset *intsetAdd(intset *is, int64_t value, uint8_t *success);
+/* 向整数集合中移除一个整数 */
 intset *intsetRemove(intset *is, int64_t value, int *success);
+/* 断言整数集合是否包含一个整数 */
 uint8_t intsetFind(intset *is, int64_t value);
+/* 随机返回一个整数 */
 int64_t intsetRandom(intset *is);
+/* 按位置获取一个整数 */
 uint8_t intsetGet(intset *is, uint32_t pos, int64_t *value);
+/* 返回整数集合的长度 */
 uint32_t intsetLen(const intset *is);
+/* 返回整数集合的字节数 */
 size_t intsetBlobLen(intset *is);
+/* 验证整数集合完整性 */
 int intsetValidateIntegrity(const unsigned char *is, size_t size, int deep);
 
 #ifdef REDIS_TEST

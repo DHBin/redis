@@ -41,11 +41,15 @@
  * On error, NULL is returned. Otherwise the pointer to the new list. */
 list *listCreate(void)
 {
+    /* 定义链表的结构体 */
     struct list *list;
 
+    /* 分配空间 */
     if ((list = zmalloc(sizeof(*list))) == NULL)
         return NULL;
+    /* 把头部和尾部初始化为NULL */
     list->head = list->tail = NULL;
+    /* 长度 */
     list->len = 0;
     list->dup = NULL;
     list->free = NULL;
@@ -54,6 +58,7 @@ list *listCreate(void)
 }
 
 /* Remove all the elements from the list without destroying the list itself. */
+/* 清空链表 */
 void listEmpty(list *list)
 {
     unsigned long len;
@@ -61,19 +66,27 @@ void listEmpty(list *list)
 
     current = list->head;
     len = list->len;
+    /* 遍历链表 */
     while(len--) {
+        /* 获取下一个节点 */
         next = current->next;
+        /* 如果当前节点的释放函数不是空的话，调用释放函数对节点的值进行释放 */
         if (list->free) list->free(current->value);
+        /* 释放当前节点 */
         zfree(current);
+        /* 把下一个节点复制给当前节点，下一次遍历使用 */
         current = next;
     }
+    /* 把头部和尾部清空 */
     list->head = list->tail = NULL;
+    /* 把长度赋值为0 */
     list->len = 0;
 }
 
 /* Free the whole list.
  *
  * This function can't fail. */
+/* 清空链表，并回收内存 */
 void listRelease(list *list)
 {
     listEmpty(list);
@@ -86,22 +99,34 @@ void listRelease(list *list)
  * On error, NULL is returned and no operation is performed (i.e. the
  * list remains unaltered).
  * On success the 'list' pointer you pass to the function is returned. */
+/* 在链表头部插入，O(1) */
 list *listAddNodeHead(list *list, void *value)
 {
+    /* 创建一个节点 */
     listNode *node;
 
+    /* 给创建的节点分配内存 */
     if ((node = zmalloc(sizeof(*node))) == NULL)
         return NULL;
+    /* 把值放到节点里面去 */
     node->value = value;
+    /* 如果链表的长度是0的话 */
     if (list->len == 0) {
+        /* 链表的头部和尾部的指针都指向这个节点 */
         list->head = list->tail = node;
+        /* 节点的下一个节点和上一个节点都是NULL */
         node->prev = node->next = NULL;
     } else {
+        /* 因为是在头部插入，所以prev节点是NULL */
         node->prev = NULL;
+        /* 把节点的下一个节点指向链表的头部节点 */
         node->next = list->head;
+        /* 把原头部节点的上一个节点指向新创建的这个节点 */
         list->head->prev = node;
+        /* 把链表的头部节点换成新创建的这个节点 */
         list->head = node;
     }
+    /* 链表长度+1 */
     list->len++;
     return list;
 }
@@ -112,26 +137,40 @@ list *listAddNodeHead(list *list, void *value)
  * On error, NULL is returned and no operation is performed (i.e. the
  * list remains unaltered).
  * On success the 'list' pointer you pass to the function is returned. */
+/* 在链表尾部插入 O(1) */
 list *listAddNodeTail(list *list, void *value)
 {
+    /* 创建一个节点 */
     listNode *node;
 
+    /* 给创建的节点分配内存 */
     if ((node = zmalloc(sizeof(*node))) == NULL)
         return NULL;
+
+    /* 把值放到节点里面去 */
     node->value = value;
+    /* 如果链表的长度是0的话 */
     if (list->len == 0) {
+        /* 链表的头部和尾部的指针都指向这个节点 */
         list->head = list->tail = node;
+        /* 节点的下一个节点和上一个节点都是NULL */
         node->prev = node->next = NULL;
     } else {
+        /* 新建节点的上一个节点指向链表的原尾部节点 */
         node->prev = list->tail;
+        /* 因为是尾部插入，所以节点的下一个节点是空 */
         node->next = NULL;
+        /* 把链表的原尾部节点的下一个节点指向新创建的这个节点 */
         list->tail->next = node;
+        /* 把链表的尾部节点指向新建的这个节点 */
         list->tail = node;
     }
+    /* 链表长度+1 */
     list->len++;
     return list;
 }
 
+/* 在某个节点插入 O(1) */
 list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
     listNode *node;
 
@@ -165,6 +204,7 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
  * It's up to the caller to free the private value of the node.
  *
  * This function can't fail. */
+/* 删除某个节点，O(1) */
 void listDelNode(list *list, listNode *node)
 {
     if (node->prev)
@@ -288,18 +328,25 @@ list *listDup(list *orig)
  * On success the first matching node pointer is returned
  * (search starts from head). If no matching node exists
  * NULL is returned. */
+/* 查找 */
 listNode *listSearchKey(list *list, void *key)
 {
+    /* 链表迭代器 */
     listIter iter;
+    /* 节点 */
     listNode *node;
 
+    /* 创建迭代器 */
     listRewind(list, &iter);
+    /* 遍历链表 */
     while((node = listNext(&iter)) != NULL) {
+        /* 如果链表有设置对比函数，则使用对比函数对比 */
         if (list->match) {
             if (list->match(node->value, key)) {
                 return node;
             }
         } else {
+            /* 判断返回 */
             if (key == node->value) {
                 return node;
             }

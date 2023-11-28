@@ -103,7 +103,9 @@ quicklist *quicklistCreate(void) {
     quicklist->head = quicklist->tail = NULL;
     quicklist->len = 0;
     quicklist->count = 0;
+    /* 是否压缩节点 */
     quicklist->compress = 0;
+    /* -2 意思是一个压缩链表的字节数最大是8k */
     quicklist->fill = -2;
     quicklist->bookmark_count = 0;
     return quicklist;
@@ -359,6 +361,7 @@ REDIS_STATIC void __quicklistCompress(const quicklist *quicklist,
 REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
                                         quicklistNode *old_node,
                                         quicklistNode *new_node, int after) {
+    /* 在旧的节点之后插入新的节点 */
     if (after) {
         new_node->prev = old_node;
         if (old_node) {
@@ -369,7 +372,7 @@ REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
         }
         if (quicklist->tail == old_node)
             quicklist->tail = new_node;
-    } else {
+    } else { /* 在旧的节点之前插入新的节点 */
         new_node->next = old_node;
         if (old_node) {
             new_node->prev = old_node->prev;
@@ -381,6 +384,7 @@ REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
             quicklist->head = new_node;
     }
     /* If this insert creates the only element so far, initialize head/tail. */
+    /* 第一次插入数据的时候 */
     if (quicklist->len == 0) {
         quicklist->head = quicklist->tail = new_node;
     }
@@ -388,6 +392,7 @@ REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
     /* Update len first, so in __quicklistCompress we know exactly len */
     quicklist->len++;
 
+    /* 如果旧的节点不是空的话，对旧节点进行压缩 */
     if (old_node)
         quicklistCompress(quicklist, old_node);
 }
@@ -430,6 +435,7 @@ REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
     if (unlikely(!node))
         return 0;
 
+    /* 压缩链表节点的头部字节数 */
     int ziplist_overhead;
     /* size of previous offset */
     if (sz < 254)
@@ -447,6 +453,19 @@ REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
 
     /* new_sz overestimates if 'sz' encodes to an integer type */
     unsigned int new_sz = node->sz + sz + ziplist_overhead;
+    /*
+     * 如果fill是负数：
+     * fill的值关系到压缩链表的字节大小，关系如下
+     * {-2  , -3  , -4   , -5   , -6  }
+     * {4096, 8192, 16384, 32768, 65536}
+     * 计算公式是 (-fill) - 1 = 数组的偏移量
+     *
+     * 如果fill是正数：
+     *  fill的值大于8192的话，返回0
+     * 如果节点的元素数量小于fill，返回1
+     *  返回1
+     *
+     * */
     if (likely(_quicklistNodeSizeMeetsOptimizationRequirement(new_sz, fill)))
         return 1;
     /* when we return 1 above we know that the limit is a size limit (which is
@@ -492,6 +511,10 @@ REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a,
 int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
     quicklistNode *orig_head = quicklist->head;
     assert(sz < UINT32_MAX); /* TODO: add support for quicklist nodes that are sds encoded (not zipped) */
+    /*
+     * 判断头节点还能不能插入节点，可以的话在头节点插入
+     * 否则，新建一个节点
+     * */
     if (likely(
             _quicklistNodeAllowInsert(quicklist->head, quicklist->fill, sz))) {
         quicklist->head->zl =
@@ -852,14 +875,26 @@ REDIS_STATIC quicklistNode *_quicklistSplitNode(quicklistNode *node, int offset,
  *
  * If after==1, the new value is inserted after 'entry', otherwise
  * the new value is inserted before 'entry'. */
+/* 在某个元素的之前或者之后插入 */
 REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
                                    void *value, const size_t sz, int after) {
+    /*
+     * 我们把在某个元素之前或者之后插入的这个元素称为 基准元素
+     * 下面是每个变量的含义
+     * full：基准元素所在的压缩链表是否允许继续插入元素
+     * at_tail：基准元素在压缩链表的尾部
+     * at_head：基准元素在压缩链表的头部
+     * full_next：基准元素所在的链表的下一个链表是否允许插入
+     * full_prev：基准元素所在的链表的上一个链表是否允许插入
+     * after：在基准元素的之前还是之后插入
+     * */
     int full = 0, at_tail = 0, at_head = 0, full_next = 0, full_prev = 0;
     int fill = quicklist->fill;
     quicklistNode *node = entry->node;
     quicklistNode *new_node = NULL;
     assert(sz < UINT32_MAX); /* TODO: add support for quicklist nodes that are sds encoded (not zipped) */
 
+    /* 如果没有指定节点，创建一个新的节点，并插入元素，直接返回 */
     if (!node) {
         /* we have no reference node, so let's create only node in the list */
         D("No node given!");
@@ -898,6 +933,9 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
 
     /* Now determine where and how to insert the new element */
     if (!full && after) {
+        /* 1、压缩链表未满
+         * 2、在基准元素之后插入
+         * */
         D("Not full, inserting after current position.");
         quicklistDecompressNodeForUse(node);
         unsigned char *next = ziplistNext(node->zl, entry->zi);
@@ -910,6 +948,9 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
         quicklistNodeUpdateSz(node);
         quicklistRecompressOnly(quicklist, node);
     } else if (!full && !after) {
+        /* 1、压缩链表未满
+         * 2、在基准元素之前插入
+         * */
         D("Not full, inserting before current position.");
         quicklistDecompressNodeForUse(node);
         node->zl = ziplistInsert(node->zl, entry->zi, value, sz);
@@ -917,6 +958,8 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
         quicklistNodeUpdateSz(node);
         quicklistRecompressOnly(quicklist, node);
     } else if (full && at_tail && node->next && !full_next && after) {
+        /* 1、在基准元素之后插入 */
+        /* 2、基准元素所在的链表不允许插入，并且基准链表在链表的尾部，但下一个压缩链表还允许插入 */
         /* If we are: at tail, next has free space, and inserting after:
          *   - insert entry at head of next node. */
         D("Full and tail, but next isn't full; inserting next node head");
@@ -927,6 +970,8 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
         quicklistNodeUpdateSz(new_node);
         quicklistRecompressOnly(quicklist, new_node);
     } else if (full && at_head && node->prev && !full_prev && !after) {
+        /* 1、在基准元素的之前插入 */
+        /* 2、基准元素所在的链表不允许插入，并且基准元素在链表的头部，但上一个压缩链表还允许插入 */
         /* If we are: at head, previous has free space, and inserting before:
          *   - insert entry at tail of previous node. */
         D("Full and head, but prev isn't full, inserting prev node tail");
@@ -938,6 +983,11 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
         quicklistRecompressOnly(quicklist, new_node);
     } else if (full && ((at_tail && node->next && full_next && after) ||
                         (at_head && node->prev && full_prev && !after))) {
+        /*
+         * 1、基准元素所在的链表已满
+         * 2、在基准元素之后插入，基准元素在链表的尾部，但基准元素的下一个链表已满
+         * 3、在基准元素之前插入，基准元素在链表的头部，但基准元素的上一个链表已满
+         * */
         /* If we are: full, and our prev/next is full, then:
          *   - create new node and attach to quicklist */
         D("\tprovisioning new node...");
@@ -947,6 +997,7 @@ REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry,
         quicklistNodeUpdateSz(new_node);
         __quicklistInsertNode(quicklist, node, new_node, after);
     } else if (full) {
+        /* 1、基准元素所在的链表已满 */
         /* else, node is full we need to split it. */
         /* covers both after and !after cases */
         D("\tsplitting node...");

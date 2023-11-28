@@ -43,6 +43,15 @@
  * recompress: 1 bit, bool, true if node is temporary decompressed for usage.
  * attempted_compress: 1 bit, boolean, used for verifying during testing.
  * extra: 10 bits, free for future use; pads out the remainder of 32 bits */
+/*
+ * 快速链表节点是一个32位大小的结构体，用来描述当前压缩链表的一些属性
+ * count： 16位，最大值是65536
+ * encoding：2位，标识是否压缩
+ * container：2位，这个值在现在的版本只有一个值，2
+ * recompress：1位，如果是1的话，表示这个压缩链表被压缩过了
+ * attempted_compress：测试使用
+ * extra：占位
+ * */
 typedef struct quicklistNode {
     struct quicklistNode *prev;
     struct quicklistNode *next;
@@ -61,6 +70,9 @@ typedef struct quicklistNode {
  * 'compressed' is LZF data with total (compressed) length 'sz'
  * NOTE: uncompressed length is stored in quicklistNode->sz.
  * When quicklistNode->zl is compressed, node->zl points to a quicklistLZF */
+/*
+ * 通过LZF算法压缩后的压缩链表
+ * */
 typedef struct quicklistLZF {
     unsigned int sz; /* LZF size in bytes*/
     char compressed[];

@@ -2765,7 +2765,9 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
     startLoadingFile(fp, filename,rdbflags);
+    /* 初始化rdb对象 */
     rioInitWithFile(&rdb,fp);
+    /* 加载数据 */
     retval = rdbLoadRio(&rdb,rdbflags,rsi);
     fclose(fp);
     stopLoading(retval==C_OK);
