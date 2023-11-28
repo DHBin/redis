@@ -30,6 +30,7 @@
 #include "server.h"
 #include "cluster.h"
 #include "atomicvar.h"
+#include "latency.h"
 
 #include <signal.h>
 #include <ctype.h>
@@ -164,7 +165,7 @@ robj *lookupKeyWriteWithFlags(redisDb *db, robj *key, int flags) {
 robj *lookupKeyWrite(redisDb *db, robj *key) {
     return lookupKeyWriteWithFlags(db, key, LOOKUP_NONE);
 }
-static void SentReplyOnKeyMiss(client *c, robj *reply){
+void SentReplyOnKeyMiss(client *c, robj *reply){
     serverAssert(sdsEncodedObject(reply));
     sds rep = reply->ptr;
     if (sdslen(rep) > 1 && rep[0] == '-'){
@@ -576,7 +577,7 @@ long long dbTotalServerKeyCount() {
  * a context of a client. */
 void signalModifiedKey(client *c, redisDb *db, robj *key) {
     touchWatchedKey(db,key);
-    trackingInvalidateKey(c,key);
+    trackingInvalidateKey(c,key,1);
 }
 
 void signalFlushedDb(int dbid, int async) {
@@ -1437,6 +1438,22 @@ long long getExpire(redisDb *db, robj *key) {
     return dictGetSignedIntegerVal(de);
 }
 
+/* Delete the specified expired key and propagate expire. */
+void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
+    mstime_t expire_latency;
+    latencyStartMonitor(expire_latency);
+    if (server.lazyfree_lazy_expire)
+        dbAsyncDelete(db,keyobj);
+    else
+        dbSyncDelete(db,keyobj);
+    latencyEndMonitor(expire_latency);
+    latencyAddSampleIfNeeded("expire-del",expire_latency);
+    notifyKeyspaceEvent(NOTIFY_EXPIRED,"expired",keyobj,db->id);
+    signalModifiedKey(NULL, db, keyobj);
+    propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
+    server.stat_expiredkeys++;
+}
+
 /* Propagate expires into slaves and the AOF file.
  * When a key expires in the master, a DEL operation for this key is sent
  * to all the slaves and the AOF file if enabled.
@@ -1541,16 +1558,7 @@ int expireIfNeeded(redisDb *db, robj *key) {
     if (checkClientPauseTimeoutAndReturnIfPaused()) return 1;
 
     /* Delete the key */
-    if (server.lazyfree_lazy_expire) {
-        dbAsyncDelete(db,key);
-    } else {
-        dbSyncDelete(db,key);
-    }
-    server.stat_expiredkeys++;
-    propagateExpire(db,key,server.lazyfree_lazy_expire);
-    notifyKeyspaceEvent(NOTIFY_EXPIRED,
-        "expired",key,db->id);
-    signalModifiedKey(NULL,db,key);
+    deleteExpiredKeyAndPropagate(db,key);
     return 1;
 }
 
@@ -1615,7 +1623,6 @@ int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, get
              * return no keys and expect the command implementation to report
              * an arity or syntax error. */
             if (cmd->flags & CMD_MODULE || cmd->arity < 0) {
-                getKeysFreeResult(result);
                 result->numkeys = 0;
                 return 0;
             } else {

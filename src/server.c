@@ -871,7 +871,7 @@ struct redisCommand redisCommandTable[] = {
 
     {"migrate",migrateCommand,-6,
      "write random @keyspace @dangerous",
-     0,migrateGetKeys,0,0,0,0,0,0},
+     0,migrateGetKeys,3,3,1,0,0,0},
 
     {"asking",askingCommand,1,
      "fast @keyspace",
@@ -1588,13 +1588,15 @@ int incrementallyRehash(int dbid) {
  * as we want to avoid resizing the hash tables when there is a child in order
  * to play well with copy-on-write (otherwise when a resize happens lots of
  * memory pages are copied). The goal of this function is to update the ability
- * for dict.c to resize the hash tables accordingly to the fact we have an
+ * for dict.c to resize or rehash the tables accordingly to the fact we have an
  * active fork child running. */
 void updateDictResizePolicy(void) {
-    if (!hasActiveChildProcess())
-        dictEnableResize();
+    if (server.in_fork_child != CHILD_TYPE_NONE)
+        dictSetResizeEnabled(DICT_RESIZE_FORBID);
+    else if (hasActiveChildProcess())
+        dictSetResizeEnabled(DICT_RESIZE_AVOID);
     else
-        dictDisableResize();
+        dictSetResizeEnabled(DICT_RESIZE_ENABLE);
 }
 
 const char *strChildType(int type) {
@@ -1687,7 +1689,7 @@ int clientsCronResizeQueryBuffer(client *c) {
         /* Only resize the query buffer if it is actually wasting
          * at least a few kbytes. */
         if (sdsavail(c->querybuf) > 1024*4) {
-            c->querybuf = sdsRemoveFreeSpace(c->querybuf);
+            c->querybuf = sdsRemoveFreeSpace(c->querybuf,1);
         }
     }
     /* Reset the peak again to capture the peak memory usage in the next
@@ -1707,7 +1709,7 @@ int clientsCronResizeQueryBuffer(client *c) {
         if(pending_querybuf_size > LIMIT_PENDING_QUERYBUF &&
            sdslen(c->pending_querybuf) < (pending_querybuf_size/2))
         {
-            c->pending_querybuf = sdsRemoveFreeSpace(c->pending_querybuf);
+            c->pending_querybuf = sdsRemoveFreeSpace(c->pending_querybuf,1);
         }
     }
     return 0;
@@ -1904,18 +1906,8 @@ void databasesCron(void) {
     }
 }
 
-/* We take a cached value of the unix time in the global state because with
- * virtual memory and aging there is to store the current time in objects at
- * every object access, and accuracy is not needed. To access a global var is
- * a lot faster than calling time(NULL).
- *
- * This function should be fast because it is called at every command execution
- * in call(), so it is possible to decide if to update the daylight saving
- * info or not using the 'update_daylight_info' argument. Normally we update
- * such info only when calling this function from serverCron() but not when
- * calling it from call(). */
-void updateCachedTime(int update_daylight_info) {
-    server.ustime = ustime();
+static inline void updateCachedTimeWithUs(int update_daylight_info, const long long ustime) {
+    server.ustime = ustime;
     server.mstime = server.ustime / 1000;
     time_t unixtime = server.mstime / 1000;
     atomicSet(server.unixtime, unixtime);
@@ -1931,6 +1923,21 @@ void updateCachedTime(int update_daylight_info) {
         localtime_r(&ut,&tm);
         server.daylight_active = tm.tm_isdst;
     }
+}
+
+/* We take a cached value of the unix time in the global state because with
+ * virtual memory and aging there is to store the current time in objects at
+ * every object access, and accuracy is not needed. To access a global var is
+ * a lot faster than calling time(NULL).
+ *
+ * This function should be fast because it is called at every command execution
+ * in call(), so it is possible to decide if to update the daylight saving
+ * info or not using the 'update_daylight_info' argument. Normally we update
+ * such info only when calling this function from serverCron() but not when
+ * calling it from call(). */
+void updateCachedTime(int update_daylight_info) {
+    const long long us = ustime();
+    updateCachedTimeWithUs(update_daylight_info, us);
 }
 
 void checkChildrenDone(void) {
@@ -2065,6 +2072,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             }
         }
     }
+
+    /* for debug purposes: skip actual cron work if pause_cron is on */
+    if (server.pause_cron) return 1000/server.hz;
 
     run_with_period(100) {
         long long stat_net_input_bytes, stat_net_output_bytes;
@@ -2435,6 +2445,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * our clients. */
     updateFailoverStatus();
 
+    /* Since we rely on current_client to send scheduled invalidation messages
+     * we have to flush them after each command, so when we get here, the list
+     * must be empty. */
+    serverAssert(listLength(server.tracking_pending_keys) == 0);
+
     /* Send the invalidation messages to clients participating to the
      * client side caching protocol in broadcasting (BCAST) mode. */
     trackingBroadcastInvalidationMessages();
@@ -2626,6 +2641,10 @@ void createSharedObjects(void) {
             sdscatprintf(sdsempty(),"*%d\r\n",j));
         shared.bulkhdr[j] = createObject(OBJ_STRING,
             sdscatprintf(sdsempty(),"$%d\r\n",j));
+        shared.maphdr[j] = createObject(OBJ_STRING,
+            sdscatprintf(sdsempty(),"%%%d\r\n",j));
+        shared.sethdr[j] = createObject(OBJ_STRING,
+            sdscatprintf(sdsempty(),"~%d\r\n",j));
     }
     /* The following two shared objects, minstring and maxstrings, are not
      * actually used for their value but as a special object meaning
@@ -2687,6 +2706,7 @@ void initServerConfig(void) {
     server.migrate_cached_sockets = dictCreate(&migrateCacheDictType,NULL);
     server.next_client_id = 1; /* Client IDs, start from 1 .*/
     server.loading_process_events_interval_bytes = (1024*1024*2);
+    server.pause_cron = 0;
 
     unsigned int lruclock = getLRUClock();
     atomicSet(server.lruclock,lruclock);
@@ -2770,6 +2790,10 @@ void initServerConfig(void) {
      * script to the slave / AOF. This is the new way starting from
      * Redis 5. However it is possible to revert it via redis.conf. */
     server.lua_always_replicate_commands = 1;
+
+    /* Client Pause related */
+    server.client_pause_type = CLIENT_PAUSE_OFF;
+    server.client_pause_end_time = 0;   
 
     initConfigValues();
 }
@@ -3167,6 +3191,7 @@ void initServer(void) {
     server.current_client = NULL;
     server.errors = raxNew();
     server.fixed_time_expire = 0;
+    server.in_nested_call = 0;
     server.clients = listCreate();
     server.clients_index = raxNew();
     server.clients_to_close = listCreate();
@@ -3179,6 +3204,7 @@ void initServer(void) {
     server.slaveseldb = -1; /* Force to emit the first SELECT command. */
     server.unblocked_clients = listCreate();
     server.ready_keys = listCreate();
+    server.tracking_pending_keys = listCreate();
     server.clients_waiting_acks = listCreate();
     server.get_ack_from_slaves = 0;
     server.client_pause_type = 0;
@@ -3214,11 +3240,13 @@ void initServer(void) {
     /* Open the TCP listening socket for the user commands. */
     if (server.port != 0 &&
         listenToPort(server.port,&server.ipfd) == C_ERR) {
+        /* Note: the following log text is matched by the test suite. */
         serverLog(LL_WARNING, "Failed listening on port %u (TCP), aborting.", server.port);
         exit(1);
     }
     if (server.tls_port != 0 &&
         listenToPort(server.tls_port,&server.tlsfd) == C_ERR) {
+        /* Note: the following log text is matched by the test suite. */
         serverLog(LL_WARNING, "Failed listening on port %u (TLS), aborting.", server.tls_port);
         exit(1);
     }
@@ -3716,7 +3744,6 @@ void slowlogPushCurrentCommand(client *c, struct redisCommand *cmd, ustime_t dur
  */
 void call(client *c, int flags) {
     long long dirty;
-    monotime call_timer;
     int client_old_flags = c->flags;
     struct redisCommand *real_cmd = c->cmd;
     static long long prev_err_count;
@@ -3731,15 +3758,30 @@ void call(client *c, int flags) {
     dirty = server.dirty;
     prev_err_count = server.stat_total_error_replies;
 
+    const long long call_timer = ustime();
+
     /* Update cache time, in case we have nested calls we want to
      * update only on the first call*/
     if (server.fixed_time_expire++ == 0) {
-        updateCachedTime(0);
+        updateCachedTimeWithUs(0,call_timer);
     }
 
-    elapsedStart(&call_timer);
+    monotime monotonic_start = 0;
+    if (monotonicGetType() == MONOTONIC_CLOCK_HW)
+        monotonic_start = getMonotonicUs();
+
+    server.in_nested_call++;
     c->cmd->proc(c);
-    const long duration = elapsedUs(call_timer);
+    server.in_nested_call--;
+
+    /* In order to avoid performance implication due to querying the clock using a system call 3 times,
+     * we use a monotonic clock, when we are sure its cost is very low, and fall back to non-monotonic call otherwise. */
+    ustime_t duration;
+    if (monotonicGetType() == MONOTONIC_CLOCK_HW)
+        duration = getMonotonicUs() - monotonic_start;
+    else
+        duration = ustime() - call_timer;
+
     c->duration = duration;
     dirty = server.dirty-dirty;
     if (dirty < 0) dirty = 0;
@@ -3918,6 +3960,9 @@ void call(client *c, int flags) {
     size_t zmalloc_used = zmalloc_used_memory();
     if (zmalloc_used > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used;
+
+    /* Do some maintenance job and cleanup */
+    afterCommand(c);
 }
 
 /* Used when a command that is ready for execution needs to be rejected, due to
@@ -3960,6 +4005,14 @@ void rejectCommandFormat(client *c, const char *fmt, ...) {
 static int cmdHasMovableKeys(struct redisCommand *cmd) {
     return (cmd->getkeys_proc && !(cmd->flags & CMD_MODULE)) ||
             cmd->flags & CMD_MODULE_GETKEYS;
+}
+
+/* This is called after a command in call, we can do some maintenance job in it. */
+void afterCommand(client *c) {
+    UNUSED(c);
+    /* Flush pending invalidation messages only when we are not in nested call.
+     * So the messages are not interleaved with transaction response. */
+    if (!server.in_nested_call) trackingHandlePendingKeyInvalidations();
 }
 
 /* If this function gets called we already read a whole
@@ -4025,13 +4078,8 @@ int processCommand(client *c) {
     int is_may_replicate_command = (c->cmd->flags & (CMD_WRITE | CMD_MAY_REPLICATE)) ||
                                    (c->cmd->proc == execCommand && (c->mstate.cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)));
 
-    /* Check if the user is authenticated. This check is skipped in case
-     * the default user is flagged as "nopass" and is active. */
-    int auth_required = (!(DefaultUser->flags & USER_FLAG_NOPASS) ||
-                          (DefaultUser->flags & USER_FLAG_DISABLED)) &&
-                        !c->authenticated;
-    if (auth_required) {
-        /* AUTH and HELLO and no auth modules are valid even in
+    if (authRequired(c)) {
+        /* AUTH and HELLO and no auth commands are valid even in
          * non-authenticated state. */
         if (!(c->cmd->flags & CMD_NO_AUTH)) {
             rejectCommand(c,shared.noautherr);
@@ -4103,6 +4151,13 @@ int processCommand(client *c) {
      * propagation of DELs due to eviction. */
     if (server.maxmemory && !server.lua_timedout) {
         int out_of_memory = (performEvictions() == EVICT_FAIL);
+
+        /* performEvictions may evict keys, so we need flush pending tracking
+         * invalidation keys. If we don't do this, we may get an invalidation
+         * message after we perform operation on the key, where in fact this
+         * message belongs to the old value of the key before it gets evicted.*/
+        trackingHandlePendingKeyInvalidations();
+
         /* performEvictions may flush slave output buffers. This may result
          * in a slave, that may be the active client, to be freed. */
         if (server.current_client == NULL) return C_ERR;
@@ -4700,6 +4755,7 @@ sds genRedisInfoString(const char *section) {
             "redis_mode:%s\r\n"
             "os:%s %s %s\r\n"
             "arch_bits:%i\r\n"
+            "monotonic_clock:%s\r\n"
             "multiplexing_api:%s\r\n"
             "atomicvar_api:%s\r\n"
             "gcc_version:%i.%i.%i\r\n"
@@ -4723,6 +4779,7 @@ sds genRedisInfoString(const char *section) {
             mode,
             name.sysname, name.release, name.machine,
             server.arch_bits,
+            monotonicInfoString(),
             aeGetApiName(),
             REDIS_ATOMIC_API,
 #ifdef __GNUC__
@@ -5113,11 +5170,15 @@ sds genRedisInfoString(const char *section) {
             server.masterhost == NULL ? "master" : "slave");
         if (server.masterhost) {
             long long slave_repl_offset = 1;
+            long long slave_read_repl_offset = 1;
 
-            if (server.master)
+            if (server.master) {
                 slave_repl_offset = server.master->reploff;
-            else if (server.cached_master)
+                slave_read_repl_offset = server.master->read_reploff;
+            } else if (server.cached_master) {
                 slave_repl_offset = server.cached_master->reploff;
+                slave_read_repl_offset = server.cached_master->read_reploff;
+            }
 
             info = sdscatprintf(info,
                 "master_host:%s\r\n"
@@ -5125,6 +5186,7 @@ sds genRedisInfoString(const char *section) {
                 "master_link_status:%s\r\n"
                 "master_last_io_seconds_ago:%d\r\n"
                 "master_sync_in_progress:%d\r\n"
+                "slave_read_repl_offset:%lld\r\n"
                 "slave_repl_offset:%lld\r\n"
                 ,server.masterhost,
                 server.masterport,
@@ -5133,6 +5195,7 @@ sds genRedisInfoString(const char *section) {
                 server.master ?
                 ((int)(server.unixtime-server.master->lastinteraction)) : -1,
                 server.repl_state == REPL_STATE_TRANSFER,
+                slave_read_repl_offset,
                 slave_repl_offset
             );
 
@@ -5425,8 +5488,15 @@ int linuxOvercommitMemoryValue(void) {
 }
 
 void linuxMemoryWarnings(void) {
-    if (linuxOvercommitMemoryValue() == 0) {
-        serverLog(LL_WARNING,"WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.");
+    if (linuxOvercommitMemoryValue() != 1) {
+        const char *msg =
+            "WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. "
+#if defined(USE_JEMALLOC)
+            "Being disabled, it can can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. "
+#endif
+            "To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the "
+            "command 'sysctl vm.overcommit_memory=1' for this to take effect.";
+        serverLog(LL_WARNING, "%s", msg);
     }
     if (THPIsEnabled() && THPDisable()) {
         serverLog(LL_WARNING,"WARNING you have Transparent Huge Pages (THP) support enabled in your kernel. This will create latency and memory usage issues with Redis. To fix this issue run the command 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled' as root, and add it to your /etc/rc.local in order to retain the setting after a reboot. Redis must be restarted after THP is disabled (set to 'madvise' or 'never').");
@@ -5886,7 +5956,12 @@ int redisFork(int purpose) {
         server.in_fork_child = purpose;
         setOOMScoreAdj(CONFIG_OOM_BGCHILD);
         setupChildSignalHandlers();
+        updateDictResizePolicy();
         closeChildUnusedResourceAfterFork();
+        /* Close the reading part, so that if the parent crashes, the child will
+         * get a write error and exit. */
+        if (server.child_info_pipe[0] != -1)
+            close(server.child_info_pipe[0]);
     } else {
         /* Parent */
         server.stat_total_forks++;
@@ -6229,9 +6304,12 @@ int main(int argc, char **argv) {
     setlocale(LC_COLLATE,"");
     tzset(); /* Populates 'timezone' global. */
     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
-    srand(time(NULL)^getpid());
-    srandom(time(NULL)^getpid());
+
+    /* To achieve entropy, in case of containers, their time() and getpid() can
+     * be the same. But value of tv_usec is fast enough to make the difference */
     gettimeofday(&tv,NULL);
+    srand(time(NULL)^getpid()^tv.tv_usec);
+    srandom(time(NULL)^getpid()^tv.tv_usec);
     init_genrand64(((long long) tv.tv_sec * 1000000 + tv.tv_usec) ^ getpid());
     crc64_init();
 

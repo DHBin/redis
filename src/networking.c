@@ -107,6 +107,15 @@ static void clientSetDefaultAuth(client *c) {
                        !(c->user->flags & USER_FLAG_DISABLED);
 }
 
+int authRequired(client *c) {
+    /* Check if the user is authenticated. This check is skipped in case
+     * the default user is flagged as "nopass" and is active. */
+    int auth_required = (!(DefaultUser->flags & USER_FLAG_NOPASS) ||
+                          (DefaultUser->flags & USER_FLAG_DISABLED)) &&
+                        !c->authenticated;
+    return auth_required;
+}
+
 client *createClient(connection *conn) {
     client *c = zmalloc(sizeof(client));
 
@@ -160,6 +169,7 @@ client *createClient(connection *conn) {
     c->slave_addr = NULL;
     c->slave_capa = SLAVE_CAPA_NONE;
     c->reply = listCreate();
+    c->deferred_reply_errors = NULL;
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
@@ -252,8 +262,10 @@ int prepareClientToWrite(client *c) {
     /* If CLIENT_CLOSE_ASAP flag is set, we need not write anything. */
     if (c->flags & CLIENT_CLOSE_ASAP) return C_ERR;
 
-    /* CLIENT REPLY OFF / SKIP handling: don't send replies. */
-    if (c->flags & (CLIENT_REPLY_OFF|CLIENT_REPLY_SKIP)) return C_ERR;
+    /* CLIENT REPLY OFF / SKIP handling: don't send replies.
+     * CLIENT_PUSHING handling: disables the reply silencing flags. */
+    if ((c->flags & (CLIENT_REPLY_OFF|CLIENT_REPLY_SKIP)) &&
+        !(c->flags & CLIENT_PUSHING)) return C_ERR;
 
     /* Masters don't receive replies, unless CLIENT_MASTER_FORCE_REPLY flag
      * is set. */
@@ -410,6 +422,18 @@ void addReplyErrorLength(client *c, const char *s, size_t len) {
 
 /* Do some actions after an error reply was sent (Log if needed, updates stats, etc.) */
 void afterErrorReply(client *c, const char *s, size_t len) {
+    /* Module clients fall into two categories:
+     * Calls to RM_Call, in which case the error isn't being returned to a client, so should not be counted.
+     * Module thread safe context calls to RM_ReplyWithError, which will be added to a real client by the main thread later. */
+    if (c->flags & CLIENT_MODULE) {
+        if (!c->deferred_reply_errors) {
+            c->deferred_reply_errors = listCreate();
+            listSetFreeMethod(c->deferred_reply_errors, (void (*)(void*))sdsfree);
+        }
+        listAddNodeTail(c->deferred_reply_errors, sdsnewlen(s, len));
+        return;
+    }
+
     /* Increment the global error counter */
     server.stat_total_error_replies++;
     /* Increment the error stats
@@ -630,6 +654,24 @@ void setDeferredAggregateLen(client *c, void *node, long length, char prefix) {
      * we return NULL in addReplyDeferredLen() */
     if (node == NULL) return;
 
+    /* Things like *2\r\n, %3\r\n or ~4\r\n are emitted very often by the protocol
+     * so we have a few shared objects to use if the integer is small
+     * like it is most of the times. */
+    const size_t hdr_len = OBJ_SHARED_HDR_STRLEN(length);
+    const int opt_hdr = length < OBJ_SHARED_BULKHDR_LEN;
+    if (prefix == '*' && opt_hdr) {
+        setDeferredReply(c, node, shared.mbulkhdr[length]->ptr, hdr_len);
+        return;
+    }
+    if (prefix == '%' && opt_hdr) {
+        setDeferredReply(c, node, shared.maphdr[length]->ptr, hdr_len);
+        return;
+    }
+    if (prefix == '~' && opt_hdr) {
+        setDeferredReply(c, node, shared.sethdr[length]->ptr, hdr_len);
+        return;
+    }
+
     char lenstr[128];
     size_t lenstr_len = sprintf(lenstr, "%c%ld\r\n", prefix, length);
     setDeferredReply(c, node, lenstr, lenstr_len);
@@ -722,11 +764,19 @@ void addReplyLongLongWithPrefix(client *c, long long ll, char prefix) {
     /* Things like $3\r\n or *2\r\n are emitted very often by the protocol
      * so we have a few shared objects to use if the integer is small
      * like it is most of the times. */
-    if (prefix == '*' && ll < OBJ_SHARED_BULKHDR_LEN && ll >= 0) {
-        addReply(c,shared.mbulkhdr[ll]);
+    const int opt_hdr = ll < OBJ_SHARED_BULKHDR_LEN && ll >= 0;
+    const size_t hdr_len = OBJ_SHARED_HDR_STRLEN(ll);
+    if (prefix == '*' && opt_hdr) {
+        addReplyProto(c,shared.mbulkhdr[ll]->ptr,hdr_len);
         return;
-    } else if (prefix == '$' && ll < OBJ_SHARED_BULKHDR_LEN && ll >= 0) {
-        addReply(c,shared.bulkhdr[ll]);
+    } else if (prefix == '$' && opt_hdr) {
+        addReplyProto(c,shared.bulkhdr[ll]->ptr,hdr_len);
+        return;
+    } else if (prefix == '%' && opt_hdr) {
+        addReplyProto(c,shared.maphdr[ll]->ptr,hdr_len);
+        return;
+    } else if (prefix == '~' && opt_hdr) {
+        addReplyProto(c,shared.sethdr[ll]->ptr,hdr_len);
         return;
     }
 
@@ -773,6 +823,7 @@ void addReplyAttributeLen(client *c, long length) {
 
 void addReplyPushLen(client *c, long length) {
     serverAssert(c->resp >= 3);
+    serverAssertWithInfo(c, NULL, c->flags & CLIENT_PUSHING);
     addReplyAggregateLen(c,length,'>');
 }
 
@@ -958,6 +1009,12 @@ void AddReplyFromClient(client *dst, client *src) {
     src->reply_bytes = 0;
     src->bufpos = 0;
 
+    if (src->deferred_reply_errors) {
+        deferredAfterErrorReply(dst, src->deferred_reply_errors);
+        listRelease(src->deferred_reply_errors);
+        src->deferred_reply_errors = NULL;
+    }
+
     /* Check output buffer limits */
     closeClientOnOutputBufferLimitReached(dst, 1);
 }
@@ -972,6 +1029,18 @@ void copyClientOutputBuffer(client *dst, client *src) {
     memcpy(dst->buf,src->buf,src->bufpos);
     dst->bufpos = src->bufpos;
     dst->reply_bytes = src->reply_bytes;
+}
+
+/* Append the listed errors to the server error statistics. the input
+ * list is not modified and remains the responsibility of the caller. */
+void deferredAfterErrorReply(client *c, list *errors) {
+    listIter li;
+    listNode *ln;
+    listRewind(errors,&li);
+    while((ln = listNext(&li))) {
+        sds err = ln->value;
+        afterErrorReply(c, err, sdslen(err));
+    }
 }
 
 /* Return true if the specified client has pending reply buffers to write to
@@ -1368,6 +1437,8 @@ void freeClient(client *c) {
     listRelease(c->reply);
     freeClientArgv(c);
     freeClientOriginalArgv(c);
+    if (c->deferred_reply_errors)
+        listRelease(c->deferred_reply_errors);
 
     /* Unlink the client: this will close the socket, remove the I/O
      * handlers, and remove references of the client from different
@@ -1654,6 +1725,10 @@ void resetClient(client *c) {
     c->multibulklen = 0;
     c->bulklen = -1;
 
+    if (c->deferred_reply_errors)
+        listRelease(c->deferred_reply_errors);
+    c->deferred_reply_errors = NULL;
+
     /* We clear the ASKING flag as well if we are not inside a MULTI, and
      * if what we just executed is not the ASKING command itself. */
     if (!(c->flags & CLIENT_MULTI) && prevcmd != askingCommand)
@@ -1862,6 +1937,10 @@ int processMultibulkBuffer(client *c) {
             addReplyError(c,"Protocol error: invalid multibulk length");
             setProtocolError("invalid mbulk count",c);
             return C_ERR;
+        } else if (ll > 10 && authRequired(c)) {
+            addReplyError(c, "Protocol error: unauthenticated multibulk length");
+            setProtocolError("unauth mbulk count", c);
+            return C_ERR;
         }
 
         c->qb_pos = (newline-c->querybuf)+2;
@@ -1908,6 +1987,10 @@ int processMultibulkBuffer(client *c) {
                 (!(c->flags & CLIENT_MASTER) && ll > server.proto_max_bulk_len)) {
                 addReplyError(c,"Protocol error: invalid bulk length");
                 setProtocolError("invalid bulk length",c);
+                return C_ERR;
+            } else if (ll > 16384 && authRequired(c)) {
+                addReplyError(c, "Protocol error: unauthenticated bulk length");
+                setProtocolError("unauth bulk length", c);
                 return C_ERR;
             }
 
@@ -1976,17 +2059,21 @@ int processMultibulkBuffer(client *c) {
  * 2. In the case of master clients, the replication offset is updated.
  * 3. Propagate commands we got from our master to replicas down the line. */
 void commandProcessed(client *c) {
+    /* If client is blocked(including paused), just return avoid reset and replicate.
+     *
+     * 1. Don't reset the client structure for blocked clients, so that the reply
+     *    callback will still be able to access the client argv and argc fields.
+     *    The client will be reset in unblockClient().
+     * 2. Don't update replication offset or propagate commands to replicas,
+     *    since we have not applied the command. */
+    if (c->flags & CLIENT_BLOCKED) return;
+
+    resetClient(c);
+
     long long prev_offset = c->reploff;
     if (c->flags & CLIENT_MASTER && !(c->flags & CLIENT_MULTI)) {
         /* Update the applied replication offset of our master. */
         c->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
-    }
-
-    /* Don't reset the client structure for blocked clients, so that the reply
-     * callback will still be able to access the client argv and argc fields.
-     * The client will be reset in unblockClient(). */
-    if (!(c->flags & CLIENT_BLOCKED)) {
-        resetClient(c);
     }
 
     /* If the client is a master we need to compute the difference
@@ -3347,6 +3434,7 @@ void unpauseClients(void) {
     client *c;
     
     server.client_pause_type = CLIENT_PAUSE_OFF;
+    server.client_pause_end_time = 0;
 
     /* Unblock all of the clients so they are reprocessed. */
     listRewind(server.paused_clients,&li);

@@ -66,7 +66,10 @@ int setTypeAdd(robj *subject, sds value) {
             if (success) {
                 /* Convert to regular set when the intset contains
                  * too many entries. */
-                if (intsetLen(subject->ptr) > server.set_max_intset_entries)
+                size_t max_entries = server.set_max_intset_entries;
+                /* limit to 1G entries due to intset internals. */
+                if (max_entries >= 1<<30) max_entries = 1<<30;
+                if (intsetLen(subject->ptr) > max_entries)
                     setTypeConvert(subject,OBJ_ENCODING_HT);
                 return 1;
             }
@@ -664,7 +667,7 @@ void srandmemberWithCountCommand(client *c) {
 
     dict *d;
 
-    if (getLongFromObjectOrReply(c,c->argv[2],&l,NULL) != C_OK) return;
+    if (getRangeLongFromObjectOrReply(c,c->argv[2],-LONG_MAX,LONG_MAX,&l,NULL) != C_OK) return;
     if (l >= 0) {
         count = (unsigned long) l;
     } else {
@@ -698,6 +701,8 @@ void srandmemberWithCountCommand(client *c) {
             } else {
                 addReplyBulkCBuffer(c,ele,sdslen(ele));
             }
+            if (c->flags & CLIENT_CLOSE_ASAP)
+                break;
         }
         return;
     }

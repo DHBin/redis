@@ -536,6 +536,8 @@ void clusterInit(void) {
         exit(1);
     }
     if (listenToPort(port+CLUSTER_PORT_INCR, &server.cfd) == C_ERR) {
+        /* Note: the following log text is matched by the test suite. */
+        serverLog(LL_WARNING, "Failed listening on port %u (cluster), aborting.", port);
         exit(1);
     }
     if (createSocketAcceptHandler(&server.cfd, clusterAcceptHandler) != C_OK) {
@@ -552,6 +554,7 @@ void clusterInit(void) {
     deriveAnnouncedPorts(&myself->port, &myself->pport, &myself->cport);
 
     server.cluster->mf_end = 0;
+    server.cluster->mf_slave = NULL;
     resetManualFailover();
     clusterUpdateMyselfFlags();
 }
@@ -707,7 +710,7 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
         }
         connNonBlock(conn);
         connEnableTcpNoDelay(conn);
-        connKeepAlive(conn,server.cluster_node_timeout * 2);
+        connKeepAlive(conn,server.cluster_node_timeout / 1000 * 2);
 
         /* Use non-blocking I/O for cluster messages. */
         serverLog(LL_VERBOSE,"Accepting cluster node connection from %s:%d", cip, cport);
@@ -3449,8 +3452,10 @@ void clusterHandleSlaveMigration(int max_slaves) {
  * The function can be used both to initialize the manual failover state at
  * startup or to abort a manual failover in progress. */
 void resetManualFailover(void) {
-    if (server.cluster->mf_end) {
-        checkClientPauseTimeoutAndReturnIfPaused();
+    if (server.cluster->mf_slave) {
+        /* We were a master failing over, so we paused clients. Regardless
+         * of the outcome we unpause now to allow traffic again. */
+        unpauseClients();
     }
     server.cluster->mf_end = 0; /* No manual failover in progress. */
     server.cluster->mf_can_start = 0;
@@ -5177,7 +5182,7 @@ void restoreCommand(client *c) {
 
     rioInitWithBuffer(&payload,c->argv[3]->ptr);
     if (((type = rdbLoadObjectType(&payload)) == -1) ||
-        ((obj = rdbLoadObject(type,&payload,key->ptr)) == NULL))
+        ((obj = rdbLoadObject(type,&payload,key->ptr,NULL)) == NULL))
     {
         addReplyError(c,"Bad data format");
         return;
@@ -5663,10 +5668,9 @@ socket_err:
 
     /* Cleanup we want to do if no retry is attempted. */
     zfree(ov); zfree(kv);
-    addReplySds(c,
-        sdscatprintf(sdsempty(),
-            "-IOERR error or timeout %s to target instance\r\n",
-            write_error ? "writing" : "reading"));
+    addReplyErrorSds(c, sdscatprintf(sdsempty(),
+                                  "-IOERR error or timeout %s to target instance",
+                                  write_error ? "writing" : "reading"));
     return;
 }
 
@@ -5979,7 +5983,8 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
     if (c->flags & CLIENT_BLOCKED &&
         (c->btype == BLOCKED_LIST ||
          c->btype == BLOCKED_ZSET ||
-         c->btype == BLOCKED_STREAM))
+         c->btype == BLOCKED_STREAM ||
+         c->btype == BLOCKED_MODULE))
     {
         dictEntry *de;
         dictIterator *di;
@@ -5992,6 +5997,11 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
             clusterRedirectClient(c,NULL,0,CLUSTER_REDIR_DOWN_STATE);
             return 1;
         }
+
+        /* If the client is blocked on module, but ont on a specific key,
+         * don't unblock it (except for the CLSUTER_FAIL case above). */
+        if (c->btype == BLOCKED_MODULE && !moduleClientIsBlockedOnKeys(c))
+            return 0;
 
         /* All keys must belong to the same slot, so check first key only. */
         di = dictGetIterator(c->bpop.keys);

@@ -1643,6 +1643,27 @@ start_server {tags {"zset"}} {
         assert_match "*syntax*" $err
     }
 
+    test {ZRANGESTORE with zset-max-ziplist-entries 0 #10767 case} {
+        set original_max [lindex [r config get zset-max-ziplist-entries] 1]
+        r config set zset-max-ziplist-entries 0
+        r del z1{t} z2{t}
+        r zadd z1{t} 1 a
+        assert_equal 1 [r zrangestore z2{t} z1{t} 0 -1]
+        r config set zset-max-ziplist-entries $original_max
+    }
+
+    test {ZRANGESTORE with zset-max-ziplist-entries 1 dst key should use skiplist encoding} {
+        set original_max [lindex [r config get zset-max-ziplist-entries] 1]
+        r config set zset-max-ziplist-entries 1
+        r del z1{t} z2{t} z3{t}
+        r zadd z1{t} 1 a 2 b
+        assert_equal 1 [r zrangestore z2{t} z1{t} 0 0]
+        assert_encoding ziplist z2{t}
+        assert_equal 2 [r zrangestore z3{t} z1{t} 0 1]
+        assert_encoding skiplist z3{t}
+        r config set zset-max-ziplist-entries $original_max
+    }
+
     test {ZRANGE invalid syntax} {
         catch {r zrange z1 0 -1 limit 1 2} err
         assert_match "*syntax*" $err
@@ -1712,6 +1733,13 @@ start_server {tags {"zset"}} {
 
     test "ZRANDMEMBER with <count> against non existing key" {
         r zrandmember nonexisting_key 100
+    } {}
+
+    test "ZRANDMEMBER count overflow" {
+        r zadd myzset 0 a
+        assert_error {*value is out of range*} {r zrandmember myzset -9223372036854770000 withscores}
+        assert_error {*value is out of range*} {r zrandmember myzset -9223372036854775808 withscores}
+        assert_error {*value is out of range*} {r zrandmember myzset -9223372036854775808}
     } {}
 
     # Make sure we can distinguish between an empty array and a null response

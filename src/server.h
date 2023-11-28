@@ -84,6 +84,12 @@ typedef long long ustime_t; /* microsecond time type. */
 #include "endianconv.h"
 #include "crc64.h"
 
+/* min/max */
+#undef min
+#undef max
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
+
 /* Error codes */
 #define C_OK                    0
 #define C_ERR                   -1
@@ -99,6 +105,7 @@ typedef long long ustime_t; /* microsecond time type. */
 #define PROTO_SHARED_SELECT_CMDS 10
 #define OBJ_SHARED_INTEGERS 10000
 #define OBJ_SHARED_BULKHDR_LEN 32
+#define OBJ_SHARED_HDR_STRLEN(_len_) (((_len_) < 10) ? 4 : 5) /* see shared.mbulkhdr etc. */
 #define LOG_MAX_LEN    1024 /* Default maximum length of syslog messages.*/
 #define AOF_REWRITE_ITEMS_PER_CMD 64
 #define AOF_READ_DIFF_INTERVAL_BYTES (1024*10)
@@ -279,6 +286,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
                                            and AOF client */
 #define CLIENT_REPL_RDBONLY (1ULL<<42) /* This client is a replica that only wants
                                           RDB without replication buffer. */
+#define CLIENT_PUSHING (1ULL<<43) /* This client is pushing notifications. */
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
@@ -882,6 +890,7 @@ typedef struct client {
     long bulklen;           /* Length of bulk argument in multi bulk request. */
     list *reply;            /* List of reply objects to send to the client. */
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
+    list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time. */
@@ -989,7 +998,9 @@ struct sharedObjectsStruct {
     *select[PROTO_SHARED_SELECT_CMDS],
     *integers[OBJ_SHARED_INTEGERS],
     *mbulkhdr[OBJ_SHARED_BULKHDR_LEN], /* "*<value>\r\n" */
-    *bulkhdr[OBJ_SHARED_BULKHDR_LEN];  /* "$<value>\r\n" */
+    *bulkhdr[OBJ_SHARED_BULKHDR_LEN],  /* "$<value>\r\n" */
+    *maphdr[OBJ_SHARED_BULKHDR_LEN],   /* "%<value>\r\n" */
+    *sethdr[OBJ_SHARED_BULKHDR_LEN];   /* "~<value>\r\n" */
     sds minstring, maxstring;
 };
 
@@ -1234,6 +1245,7 @@ struct redisServer {
     client *current_client;     /* Current client executing the command. */
     rax *clients_timeout_table; /* Radix tree for blocked clients timeouts. */
     long fixed_time_expire;     /* If > 0, expire keys against server.mstime. */
+    int in_nested_call;         /* If > 0, in a nested call of a call */
     rax *clients_index;         /* Active clients dictionary by client ID. */
     pause_type client_pause_type;      /* True if clients are currently paused */
     list *paused_clients;       /* List of pause clients */
@@ -1341,6 +1353,7 @@ struct redisServer {
     int set_proc_title;             /* True if change proc title */
     char *proc_title_template;      /* Process title template format */
     clientBufferLimitsConfig client_obuf_limits[CLIENT_TYPE_OBUF_COUNT];
+    int pause_cron;                 /* Don't run cron tasks (debug) */
     /* AOF persistence */
     int aof_enabled;                /* AOF configuration */
     int aof_state;                  /* AOF_(ON|OFF|WAIT_REWRITE) */
@@ -1515,6 +1528,7 @@ struct redisServer {
     /* Client side caching. */
     unsigned int tracking_clients;  /* # of clients with tracking enabled.*/
     size_t tracking_table_max_keys; /* Max number of keys in tracking table. */
+    list *tracking_pending_keys; /* tracking invalidation keys pending to flush */
     /* Sort parameters - qsort_r() is only available under BSD so we
      * have to take this state global, in order to pass it to sortCompare() */
     int sort_desc;
@@ -1864,6 +1878,7 @@ void addReplyHelp(client *c, const char **help);
 void addReplySubcommandSyntaxError(client *c);
 void addReplyLoadedModules(client *c);
 void copyClientOutputBuffer(client *dst, client *src);
+void deferredAfterErrorReply(client *c, list *errors);
 size_t sdsZmallocSize(sds s);
 size_t getStringObjectSdsUsedMemory(robj *o);
 void freeClientReplyValue(void *o);
@@ -1909,6 +1924,7 @@ void protectClient(client *c);
 void unprotectClient(client *c);
 void initThreadedIO(void);
 client *lookupClientByID(uint64_t id);
+int authRequired(client *c);
 
 #ifdef __GNUC__
 void addReplyErrorFormat(client *c, const char *fmt, ...)
@@ -1925,7 +1941,9 @@ void addReplyStatusFormat(client *c, const char *fmt, ...);
 void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **prefix, size_t numprefix);
 void disableTracking(client *c);
 void trackingRememberKeys(client *c);
-void trackingInvalidateKey(client *c, robj *keyobj);
+void trackingInvalidateKey(client *c, robj *keyobj, int bcast);
+void trackingScheduleKeyInvalidation(uint64_t client_id, robj *keyobj);
+void trackingHandlePendingKeyInvalidations(void);
 void trackingInvalidateKeysOnFlush(int async);
 void freeTrackingRadixTree(rax *rt);
 void freeTrackingRadixTreeAsync(rax *rt);
@@ -1985,6 +2003,8 @@ robj *createObject(int type, void *ptr);
 robj *createStringObject(const char *ptr, size_t len);
 robj *createRawStringObject(const char *ptr, size_t len);
 robj *createEmbeddedStringObject(const char *ptr, size_t len);
+robj *tryCreateRawStringObject(const char *ptr, size_t len);
+robj *tryCreateStringObject(const char *ptr, size_t len);
 robj *dupStringObject(const robj *o);
 int isSdsRepresentableAsLongLong(sds s, long long *llval);
 int isObjectRepresentableAsLongLong(robj *o, long long *llongval);
@@ -2186,7 +2206,7 @@ unsigned char *zzlFirstInRange(unsigned char *zl, zrangespec *range);
 unsigned char *zzlLastInRange(unsigned char *zl, zrangespec *range);
 unsigned long zsetLength(const robj *zobj);
 void zsetConvert(robj *zobj, int encoding);
-void zsetConvertToZiplistIfNeeded(robj *zobj, size_t maxelelen);
+void zsetConvertToZiplistIfNeeded(robj *zobj, size_t maxelelen, size_t totelelen);
 int zsetScore(robj *zobj, sds member, double *score);
 unsigned long zslGetRank(zskiplist *zsl, double score, sds o);
 int zsetAdd(robj *zobj, double score, sds ele, int in_flags, int *out_flags, double *newscore);
@@ -2235,6 +2255,8 @@ void preventCommandAOF(client *c);
 void preventCommandReplication(client *c);
 void slowlogPushCurrentCommand(client *c, struct redisCommand *cmd, ustime_t duration);
 int prepareForShutdown(int flags);
+void afterCommand(client *c);
+int inNestedCall(void);
 #ifdef __GNUC__
 void _serverLog(int level, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
@@ -2335,6 +2357,7 @@ void initConfigValues();
 
 /* db.c -- Keyspace access API */
 int removeExpire(redisDb *db, robj *key);
+void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj);
 void propagateExpire(redisDb *db, robj *key, int lazy);
 int keyIsExpired(redisDb *db, robj *key);
 int expireIfNeeded(redisDb *db, robj *key);
@@ -2350,6 +2373,7 @@ robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags);
 robj *lookupKeyWriteWithFlags(redisDb *db, robj *key, int flags);
 robj *objectCommandLookup(client *c, robj *key);
 robj *objectCommandLookupOrReply(client *c, robj *key, robj *reply);
+void SentReplyOnKeyMiss(client *c, robj *reply);
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
                        long long lru_clock, int lru_multiplier);
 #define LOOKUP_NONE 0

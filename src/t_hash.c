@@ -39,17 +39,22 @@
  * as their string length can be queried in constant time. */
 void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
     int i;
+    size_t sum = 0;
 
     if (o->encoding != OBJ_ENCODING_ZIPLIST) return;
 
     for (i = start; i <= end; i++) {
-        if (sdsEncodedObject(argv[i]) &&
-            sdslen(argv[i]->ptr) > server.hash_max_ziplist_value)
-        {
+        if (!sdsEncodedObject(argv[i]))
+            continue;
+        size_t len = sdslen(argv[i]->ptr);
+        if (len > server.hash_max_ziplist_value) {
             hashTypeConvert(o, OBJ_ENCODING_HT);
-            break;
+            return;
         }
+        sum += len;
     }
+    if (!ziplistSafeToAdd(o->ptr, sum))
+        hashTypeConvert(o, OBJ_ENCODING_HT);
 }
 
 /* Get the value from a ziplist encoded hash, identified by field.
@@ -724,6 +729,10 @@ void hincrbyfloatCommand(client *c) {
     unsigned int vlen;
 
     if (getLongDoubleFromObjectOrReply(c,c->argv[3],&incr,NULL) != C_OK) return;
+    if (isnan(incr) || isinf(incr)) {
+        addReplyError(c,"value is NaN or Infinity");
+        return;
+    }
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
     if (hashTypeGetValue(o,c->argv[2]->ptr,&vstr,&vlen,&ll) == C_OK) {
         if (vstr) {
@@ -1024,6 +1033,8 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
                 addReplyBulkCBuffer(c, key, sdslen(key));
                 if (withvalues)
                     addReplyBulkCBuffer(c, value, sdslen(value));
+                if (c->flags & CLIENT_CLOSE_ASAP)
+                    break;
             }
         } else if (hash->encoding == OBJ_ENCODING_ZIPLIST) {
             ziplistEntry *keys, *vals = NULL;
@@ -1037,6 +1048,8 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
                 count -= sample_count;
                 ziplistRandomPairs(hash->ptr, sample_count, keys, vals);
                 harndfieldReplyWithZiplist(c, sample_count, keys, vals);
+                if (c->flags & CLIENT_CLOSE_ASAP)
+                    break;
             }
             zfree(keys);
             zfree(vals);
@@ -1183,12 +1196,17 @@ void hrandfieldCommand(client *c) {
     ziplistEntry ele;
 
     if (c->argc >= 3) {
-        if (getLongFromObjectOrReply(c,c->argv[2],&l,NULL) != C_OK) return;
+        if (getRangeLongFromObjectOrReply(c,c->argv[2],-LONG_MAX,LONG_MAX,&l,NULL) != C_OK) return;
         if (c->argc > 4 || (c->argc == 4 && strcasecmp(c->argv[3]->ptr,"withvalues"))) {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
-        } else if (c->argc == 4)
+        } else if (c->argc == 4) {
             withvalues = 1;
+            if (l < -LONG_MAX/2 || l > LONG_MAX/2) {
+                addReplyError(c,"value is out of range");
+                return;
+            }
+        }
         hrandfieldWithCountCommand(c, l, withvalues);
         return;
     }

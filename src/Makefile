@@ -34,8 +34,10 @@ endif
 WARN=-Wall -W -Wno-missing-field-initializers
 OPT=$(OPTIMIZATION)
 
-# Detect if the compiler supports C11 _Atomic
-C11_ATOMIC := $(shell sh -c 'echo "\#include <stdatomic.h>" > foo.c; \
+# Detect if the compiler supports C11 _Atomic.
+# NUMBER_SIGN_CHAR is a workaround to support both GNU Make 4.3 and older versions.
+NUMBER_SIGN_CHAR := \#
+C11_ATOMIC := $(shell sh -c 'echo "$(NUMBER_SIGN_CHAR)include <stdatomic.h>" > foo.c; \
 	$(CC) -std=c11 -c foo.c -o foo.o > /dev/null 2>&1; \
 	if [ -f foo.o ]; then echo "yes"; rm foo.o; fi; rm foo.c')
 ifeq ($(C11_ATOMIC),yes)
@@ -122,12 +124,10 @@ ifeq ($(uname_S),Darwin)
 	# must be referenced explicitly during build.
 ifeq ($(uname_M),arm64)
 	# Homebrew arm64 uses /opt/homebrew as HOMEBREW_PREFIX
-	OPENSSL_CFLAGS=-I/opt/homebrew/opt/openssl/include
-	OPENSSL_LDFLAGS=-L/opt/homebrew/opt/openssl/lib
+	OPENSSL_PREFIX?=/opt/homebrew/opt/openssl
 else
 	# Homebrew x86/ppc uses /usr/local as HOMEBREW_PREFIX
-	OPENSSL_CFLAGS=-I/usr/local/opt/openssl/include
-	OPENSSL_LDFLAGS=-L/usr/local/opt/openssl/lib
+	OPENSSL_PREFIX?=/usr/local/opt/openssl
 endif
 else
 ifeq ($(uname_S),AIX)
@@ -189,6 +189,14 @@ endif
 endif
 endif
 endif
+
+ifdef OPENSSL_PREFIX
+	OPENSSL_CFLAGS=-I$(OPENSSL_PREFIX)/include
+	OPENSSL_LDFLAGS=-L$(OPENSSL_PREFIX)/lib
+	# Also export OPENSSL_PREFIX so it ends up in deps sub-Makefiles
+	export OPENSSL_PREFIX
+endif
+
 # Include paths to dependencies
 FINAL_CFLAGS+= -I../deps/hiredis -I../deps/linenoise -I../deps/lua/src -I../deps/hdr_histogram
 

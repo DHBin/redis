@@ -47,20 +47,19 @@
 #include "zmalloc.h"
 #include "redisassert.h"
 
-/* Using dictEnableResize() / dictDisableResize() we make possible to
- * enable/disable resizing of the hash table as needed. This is very important
+/* Using dictEnableResize() / dictDisableResize() we make possible to disable
+ * resizing and rehashing of the hash table as needed. This is very important
  * for Redis, as we use copy-on-write and don't want to move too much memory
  * around when there is a child performing saving operations.
  *
  * Note that even when dict_can_resize is set to 0, not all resizes are
  * prevented: a hash table is still allowed to grow if the ratio between
- * the number of elements and the buckets > dict_force_resize_ratio.
+ * the number of elements and the buckets > dict_force_resize_ratio. 
  *
  * 使用 dictEnableResize() / dictDisableResize() 可以启用或者关闭字典rehash。这对于redis来说非常
  * 重要，因为redis使用了copy-on-write技术，不希望在子进程执行持久化的时候移动过多的内存
- *
- * */
-static int dict_can_resize = 1;
+ */
+static dictResizeEnable dict_can_resize = DICT_RESIZE_ENABLE;
 static unsigned int dict_force_resize_ratio = 5;
 
 /* -------------------------- private prototypes ---------------------------- */
@@ -141,7 +140,7 @@ int dictResize(dict *d)
 {
     unsigned long minimal;
 
-    if (!dict_can_resize || dictIsRehashing(d)) return DICT_ERR;
+    if (dict_can_resize != DICT_RESIZE_ENABLE || dictIsRehashing(d)) return DICT_ERR;
     minimal = d->ht[0].used;
     if (minimal < DICT_HT_INITIAL_SIZE)
         minimal = DICT_HT_INITIAL_SIZE;
@@ -164,6 +163,10 @@ int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
     dictht n; /* the new hash table */
     /* 计算真实的大小 */
     unsigned long realsize = _dictNextPower(size);
+
+    /* Detect overflows */
+    if (realsize < size || realsize * sizeof(dictEntry*) < realsize)
+        return DICT_ERR;
 
     /* Rehashing to the same table size is not useful. */
     /* 扩容后的大小 == 原来hash的大小，直接返回 */
@@ -226,7 +229,15 @@ int dictTryExpand(dict *d, unsigned long size) {
  * */
 int dictRehash(dict *d, int n) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
-    if (!dictIsRehashing(d)) return 0;
+    unsigned long s0 = d->ht[0].size;
+    unsigned long s1 = d->ht[1].size;
+    if (dict_can_resize == DICT_RESIZE_FORBID || !dictIsRehashing(d)) return 0;
+    if (dict_can_resize == DICT_RESIZE_AVOID && 
+        ((s1 > s0 && s1 / s0 < dict_force_resize_ratio) ||
+         (s1 < s0 && s0 / s1 < dict_force_resize_ratio)))
+    {
+        return 0;
+    }
 
     while(n-- && d->ht[0].used != 0) {
         dictEntry *de, *nextde;
@@ -568,8 +579,8 @@ void *dictFetchValue(dict *d, const void *key) {
  * the fingerprint again when the iterator is released.
  * If the two fingerprints are different it means that the user of the iterator
  * performed forbidden operations against the dictionary while iterating. */
-long long dictFingerprint(dict *d) {
-    long long integers[6], hash = 0;
+unsigned long long dictFingerprint(dict *d) {
+    unsigned long long integers[6], hash = 0;
     int j;
 
     integers[0] = (long) d->ht[0].table;
@@ -1029,13 +1040,15 @@ static int _dictExpandIfNeeded(dict *d)
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
+    if (!dictTypeExpandAllowed(d))
+        return DICT_OK;
     /*
      * 表中的元素数量大于表的数组大小 && (是否允许rehash || 表中的元素数量除于表的数组大小 > 5) && 自定义是否允许扩展函数返回True
      * */
-    if (d->ht[0].used >= d->ht[0].size &&
-        (dict_can_resize ||
-         d->ht[0].used/d->ht[0].size > dict_force_resize_ratio) &&
-        dictTypeExpandAllowed(d))
+    if ((dict_can_resize == DICT_RESIZE_ENABLE &&
+         d->ht[0].used >= d->ht[0].size) ||
+        (dict_can_resize != DICT_RESIZE_FORBID &&
+         d->ht[0].used / d->ht[0].size > dict_force_resize_ratio))
     {
         return dictExpand(d, d->ht[0].used + 1);
     }
@@ -1095,12 +1108,8 @@ void dictEmpty(dict *d, void(callback)(void*)) {
     d->pauserehash = 0;
 }
 
-void dictEnableResize(void) {
-    dict_can_resize = 1;
-}
-
-void dictDisableResize(void) {
-    dict_can_resize = 0;
+void dictSetResizeEnabled(dictResizeEnable enable) {
+    dict_can_resize = enable;
 }
 
 uint64_t dictGetHash(dict *d, const void *key) {
@@ -1143,7 +1152,9 @@ size_t _dictGetStatsHt(char *buf, size_t bufsize, dictht *ht, int tableid) {
 
     if (ht->used == 0) {
         return snprintf(buf,bufsize,
-            "No stats available for empty dictionaries\n");
+            "Hash table %d stats (%s):\n"
+            "No stats available for empty dictionaries\n",
+            tableid, (tableid == 0) ? "main hash table" : "rehashing target");
     }
 
     /* Compute stats. */
