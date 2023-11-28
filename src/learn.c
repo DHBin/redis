@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <malloc.h>
+#include "zmalloc.h"
 #include <stdlib.h>
 #include "learn.h"
 #include "quicklist.h"
